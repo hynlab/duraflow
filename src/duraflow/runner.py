@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .contracts import clock_now
+
 import asyncio
 import hashlib
 import inspect
@@ -73,10 +75,10 @@ class TaskContext:
 
         def change(state: State) -> bool:
             current = self._current(state)
-            if current["lease_until"] <= self.worker.clock.now() and current["deferred"] is None:
+            if current["lease_until"] <= clock_now(self.worker.clock) and current["deferred"] is None:
                 raise Conflict("Execution lease expired")
             self.cancel_requested = bool(state["nodes"][self.node_id].get("cancel_requested"))
-            current["lease_until"] = self.worker.clock.now() + self.worker.lease_seconds
+            current["lease_until"] = clock_now(self.worker.clock) + self.worker.lease_seconds
             if progress is not None:
                 current["progress"] = progress
             return True
@@ -101,13 +103,13 @@ class TaskContext:
         def change(state: State) -> None:
             current = self._current(state)
             if (
-                current["lease_until"] <= self.worker.clock.now()
+                current["lease_until"] <= clock_now(self.worker.clock)
                 or current["observation"] is not None
                 or state["nodes"][self.node_id].get("cancel_requested")
             ):
                 raise Conflict("Cannot defer an expired, resolved or cancelled invocation")
-            current["deferred"] = {"token_hash": token_hash, "expires_at": self.worker.clock.now() + timeout}
-            event(state, "task_delegated", self.worker.clock.now(), node_id=self.node_id)
+            current["deferred"] = {"token_hash": token_hash, "expires_at": clock_now(self.worker.clock) + timeout}
+            event(state, "task_delegated", clock_now(self.worker.clock), node_id=self.node_id)
 
         await mutate(self.worker.store, self.worker.namespace, self.run_id, change)
         self._deferred = Deferred(token)
@@ -180,9 +182,10 @@ class Worker:
                 raise ProtocolError("Invalid task identity types")
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ProtocolError("Malformed task envelope") from exc
-        digest, now = fingerprint([payload, meta]), self.clock.now()
+        digest = fingerprint([payload, meta])
 
         def change(state: State) -> Any:
+            now = clock_now(self.clock)
             if state.get("codec_version", 1) != 1:
                 raise ProtocolError("Unsupported durable codec version")
             if state["archived"]:
@@ -241,7 +244,7 @@ class Worker:
 
         def change(state: State) -> None:
             current = context._current(state)
-            now = self.clock.now()
+            now = clock_now(self.clock)
             if current["lease_until"] <= now and current["deferred"] is None:
                 raise Conflict("Cannot record an outcome after lease expiry")
             if record_observation(state, state["nodes"][context.node_id], observation, now, kind="task_observed"):
@@ -265,7 +268,7 @@ class Worker:
                     event(
                         state,
                         "stale_observation",
-                        self.clock.now(),
+                        clock_now(self.clock),
                         node_id=context.node_id,
                         attempt=context.attempt,
                         epoch=context.lease_epoch,

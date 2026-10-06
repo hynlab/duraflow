@@ -1,22 +1,27 @@
 # Production hardening status
 
 Published baseline: PyPI `duraflow==0.1.0a1`, source f360e1d.
-This branch contains unreleased changes; PyPI is not modified by these commits.
+These are unreleased repository changes. PyPI is not modified by these commits.
 
-## Phase 1 — implemented and functionally verified
+| Phase | Status | Executed evidence |
+|---|---|---|
+| 1: execution correctness | Implemented, functional checks passed | Staged CI 37543699908; main CI 37544034956 |
+| 2: storage and due scheduling | Implemented, functional checks passed | Staged CI 37545190528, source 7ccd0b292511293203b18e9d3e83399df4f64f70 |
+| 3: operational tooling | Not complete | None |
+| 4: security and retention | Not complete | None |
+| 5: native failure qualification | Not complete | None |
+| 6: candidate qualification | Not complete | None |
 
-A01 validation baseline and fail-closed native checks; A02 replay subprocess
-isolation; A03 cancellation after worker loss; A04 versioned acceptance-time
-deadlines; A05 exact-build execution routing; A06 pinned codec fixtures and
-Pydantic patch-version matrix.
+Phase 1 covers A01-A06; see phase1.md for replay, lifecycle and codec boundaries.
+Phase 2 covers B01-B04: rollback-safe migrations, row-locked server-time mutations,
+indexed due-run selection and bounded infrastructure retry. Full existing tests,
+new native PostgreSQL tests, actual Pulsar integration, format/lint/mypy, frozen
+codec matrices and package validation passed before promotion.
 
-Evidence: staged CI run 37543699908, verified source
-fb351f02f9e333843c84a7514f476a443c117f58. Shared format/lint/mypy/unit checks,
-actual PostgreSQL/Pulsar integration, codec matrix and distribution checks passed.
-See phase1.md for compatibility restrictions and the role of B02 authoritative time.
+Schema v1 -> v2 requires a maintenance window with old runtime writers stopped.
+It is not an online mixed-alpha/new-runtime schema upgrade. Logical workflow
+build coexistence on the new runtime remains supported.
 
-## Remaining
-
-Phases 2–6 are not yet complete. The separate production coverage gate, actual
-native fault/restore/load qualification, real 24-hour soak and user-environment
-pilot have not been certified. Functional CI success is not production approval.
+Functional success is not production approval. Coverage thresholds, native
+crash/PITR matrices, realistic load, actual 24-hour soak and user-environment
+pilot remain explicit independent gates. No production deployment is asserted.

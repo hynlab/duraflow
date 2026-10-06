@@ -127,6 +127,7 @@ async def test_broker_failure_preserves_outbox() -> None:
             await env.engine.tick()
         assert any(not item["delivered"] for item in (await h.describe())["outbox"].values())
         env.transport.publish = original
+        env.clock.advance(1)
         assert await env.run(h) == 9
 
 

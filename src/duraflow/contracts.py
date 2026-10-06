@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 import hashlib
 import inspect
 import json
@@ -23,6 +25,7 @@ MAX_PAYLOAD_BYTES = 262_144
 PROTOCOL_VERSION = 1
 REPLAY_VERSION = 1
 CODEC_VERSION = 1
+_STORE_TIME: ContextVar[float | None] = ContextVar("duraflow_store_time", default=None)
 TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELLED", "TERMINATED", "CONTINUED"})
 
 
@@ -373,3 +376,9 @@ class ManualClock(Clock):
         if not math.isfinite(seconds) or seconds < 0:
             raise ValueError("Clock cannot move backwards")
         self.value += seconds
+
+
+def clock_now(clock: Clock) -> float:
+    """Server time inside atomic store mutations; the configured clock otherwise."""
+    trusted = _STORE_TIME.get()
+    return clock.now() if trusted is None else trusted
