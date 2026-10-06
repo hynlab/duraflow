@@ -1,4 +1,5 @@
 """Durable state coordination, retry scheduling and transactional outbox dispatch."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,9 +9,23 @@ from typing import Any
 from uuid import uuid4
 
 from .client import Client
-from .contracts import (Clock, Conflict, NotFound, ProtocolError, Registry, TERMINAL,
-                        WorkflowBlocked, canonical, decode, duration, encode, fingerprint, name)
-from .replay import replay
+from .contracts import (
+    Clock,
+    Conflict,
+    NotFound,
+    ProtocolError,
+    Registry,
+    TERMINAL,
+    WorkflowBlocked,
+    canonical,
+    decode,
+    duration,
+    encode,
+    fingerprint,
+    name,
+)
+from .executor import InlineReplayExecutor, ReplayExecutor
+from .lifecycle import accepted_before_cancel, deadline_error
 from .state import attempt, event, finish_node, identity, mutate, new_run, outbox, route, subscription
 from .storage import State, Store, clone
 from .transport import Transport
@@ -23,35 +38,43 @@ def error_data(code: str, message: str | None = None) -> dict[str, Any]:
 
 
 def settle_task(state: State, node: State, now: float) -> None:
-    """Pure task transition; caller commits the decision with an expected revision."""
+    """Legacy ordering is retained; new runs decide deadlines at result acceptance."""
     current, options = node["attempts"][-1], node["spec"]["options"]
     observation = current["observation"]
+    versioned = state.get("lifecycle_version", 1) >= 2
+    decision_time = observation.get("recorded_at", now) if versioned and observation is not None else now
+    cancel = node.get("cancel_requested") and not (versioned and accepted_before_cancel(node))
+    orphan = (
+        node.get("cancel_policy", 1) >= 2
+        and current["started_at"] is not None
+        and observation is None
+        and (current["lease_until"] <= now or current["deferred"] is not None)
+    )
     error = None
     if state["status"] == "TERMINATED":
         error = error_data("TERMINATED")
-    elif node.get("cancel_requested") and (current["started_at"] is None or observation is not None):
+    elif cancel and (current["started_at"] is None or observation is not None or orphan):
         error = error_data("CANCELLED")
-    elif options["overall_timeout"] is not None and now >= node["created_at"] + options["overall_timeout"]:
-        error = error_data("OVERALL_TIMEOUT")
-    elif (options["attempt_timeout"] is not None and current["started_at"] is not None
-          and now >= current["started_at"] + options["attempt_timeout"]):
-        error = error_data("ATTEMPT_TIMEOUT")
-    elif (options["schedule_timeout"] is not None and current["started_at"] is None
-          and now >= current["not_before"] + options["schedule_timeout"]):
-        error = error_data("SCHEDULE_TIMEOUT")
-    elif current["deferred"] is not None and now >= current["deferred"]["expires_at"]:
-        error = error_data("DELEGATION_TIMEOUT")
-    elif observation is not None:
-        error = observation["error"]
+        if orphan:
+            node["external_outcome"] = "unknown"
+            current["epoch"] += 1
+            current["owner"], current["lease_until"] = None, 0
+            event(state, "cancellation_owner_lost", now, node_id=node["id"], external_outcome="unknown")
     else:
-        return
+        error = deadline_error(node, decision_time)
+        if error is None:
+            if observation is None:
+                return
+            error = observation["error"]
     if error is None:
         finish_node(state, node, now, result=observation["result"])
         return
     policy = options["retry"]
-    can_retry = (error["code"] in policy["retry_codes"]
-                 and error["code"] not in {"OVERALL_TIMEOUT", "CANCELLED", "TERMINATED"}
-                 and not node.get("cancel_requested"))
+    can_retry = (
+        error["code"] in policy["retry_codes"]
+        and error["code"] not in {"OVERALL_TIMEOUT", "CANCELLED", "TERMINATED"}
+        and not node.get("cancel_requested")
+    )
     current["final_error"] = clone(error)
     if can_retry and current["number"] < policy["max_attempts"]:
         next_attempt = attempt(current["number"] + 1, now)
@@ -84,8 +107,11 @@ def collect(state: State, now: float) -> None:
             failures = [node["error"] for node in nodes if node["state"] == "error"]
             if failures:
                 record["state"] = "error"
-                record["error"] = (failures[0] if len(nodes) == 1 else
-                                   {"code": "GROUP_FAILURE", "message": "One or more group members failed", "causes": failures})
+                record["error"] = (
+                    failures[0]
+                    if len(nodes) == 1
+                    else {"code": "GROUP_FAILURE", "message": "One or more group members failed", "causes": failures}
+                )
             else:
                 record["state"] = "done"
                 values = [clone(node["result"]) for node in nodes]
@@ -96,9 +122,19 @@ def collect(state: State, now: float) -> None:
 
 
 class Engine:
-    def __init__(self, store: Store, transport: Transport, registry: Registry, *,
-                 namespace: str = "default", clock: Clock | None = None,
-                 batch_size: int = 100, max_commands: int = 1000, reconcile_interval: float = 10.0):
+    def __init__(
+        self,
+        store: Store,
+        transport: Transport,
+        registry: Registry,
+        *,
+        namespace: str = "default",
+        clock: Clock | None = None,
+        batch_size: int = 100,
+        max_commands: int = 1000,
+        reconcile_interval: float = 10.0,
+        replay_executor: ReplayExecutor | None = None,
+    ):
         duration(reconcile_interval)
         if not 1 <= batch_size <= 1000 or not 1 <= max_commands <= 10000:
             raise ValueError("Invalid batch/history limits")
@@ -106,8 +142,15 @@ class Engine:
         self.namespace, self.clock = name(namespace), clock or Clock()
         self.batch_size, self.max_commands = batch_size, max_commands
         self.reconcile_interval, self.cursor = reconcile_interval, ""
+        self.replay_executor = replay_executor or InlineReplayExecutor()
         self.client = Client(store, registry, namespace=namespace, clock=self.clock)
-        self.metrics = {"activations": 0, "cas_conflicts": 0, "publications": 0, "transport_errors": 0}
+        self.metrics = {
+            "activations": 0,
+            "cas_conflicts": 0,
+            "publications": 0,
+            "transport_errors": 0,
+            "unsupported_activations": 0,
+        }
 
     async def _schedule(self, state: State, spec: dict[str, Any], now: float) -> None:
         if len(state["commands"]) >= self.max_commands:
@@ -126,8 +169,16 @@ class Engine:
         handler_map = {}
         for position, member in enumerate(members):
             node_id = f"{index}.{position}"
-            node = {"id": node_id, "spec": clone(member), "state": "pending", "created_at": now,
-                    "result": None, "error": None, "accepted_seq": None, "cancel_requested": False}
+            node = {
+                "id": node_id,
+                "spec": clone(member),
+                "state": "pending",
+                "created_at": now,
+                "result": None,
+                "error": None,
+                "accepted_seq": None,
+                "cancel_requested": False,
+            }
             kind = member["kind"]
             if kind == "call":
                 node["task_id"], node["attempts"] = identity(state["run_id"], f"task/{node_id}"), [attempt(1, now)]
@@ -140,8 +191,15 @@ class Engine:
             elif kind == "signal":
                 node["due_at"] = None if member["timeout"] is None else now + member["timeout"]
             elif kind == "publish":
-                node["outbox_id"] = outbox(state, f"publication/{node_id}", "publication", member["topic"],
-                                            member["input"], now, node_id=node_id)
+                node["outbox_id"] = outbox(
+                    state,
+                    f"publication/{node_id}",
+                    "publication",
+                    member["topic"],
+                    member["input"],
+                    now,
+                    node_id=node_id,
+                )
             elif kind == "child":
                 node["child_run_id"] = identity(state["run_id"], f"child/{node_id}")
             elif kind == "now":
@@ -152,22 +210,43 @@ class Engine:
             state["nodes"][node_id] = node
         state["commands"].append(record)
         if spec["kind"] == "broadcast":
-            outbox(state, f"broadcast/{index}", "broadcast", spec["topic"], spec["input"], now,
-                   handlers=handler_map, attempt=1)
+            outbox(
+                state,
+                f"broadcast/{index}",
+                "broadcast",
+                spec["topic"],
+                spec["input"],
+                now,
+                handlers=handler_map,
+                attempt=1,
+            )
         state["status"] = "WAITING"
         event(state, "command_scheduled", now, command_id=index, operation=spec["kind"])
 
     async def _dispatch_task(self, state: State, node: State, now: float) -> None:
         current = node["attempts"][-1]
-        if (node.get("cancel_requested") or current["observation"] is not None or current["deferred"] is not None
-                or current["not_before"] > now or current["lease_until"] > now):
+        if (
+            node.get("cancel_requested")
+            or current["observation"] is not None
+            or current["deferred"] is not None
+            or current["not_before"] > now
+            or current["lease_until"] > now
+        ):
             return
         if current["dispatched"] and now - current["last_dispatch"] < self.reconcile_interval:
             return
         topic = route(self.namespace, node["spec"]["ref"])
         await self.transport.ensure(topic, "workers")
-        event_id = outbox(state, f"task/{node['id']}/{current['number']}", "task", topic,
-                          node["spec"]["input"], now, node_id=node["id"], attempt=current["number"])
+        event_id = outbox(
+            state,
+            f"task/{node['id']}/{current['number']}",
+            "task",
+            topic,
+            node["spec"]["input"],
+            now,
+            node_id=node["id"],
+            attempt=current["number"],
+        )
         state["outbox"][event_id]["delivered"] = False
         current["dispatched"], current["last_dispatch"] = True, now
 
@@ -177,9 +256,12 @@ class Engine:
         if definition.ref.descriptor() != spec["ref"]:
             raise ProtocolError("Child contract mismatch")
         try:
-            child = await self.client.start(definition.ref, decode(spec["input"], definition.ref.input_type),
-                                            request_id=f"child/{state['run_id']}/{node['id']}",
-                                            _run_id=node["child_run_id"])
+            child = await self.client.start(
+                definition.ref,
+                decode(spec["input"], definition.ref.input_type),
+                request_id=f"child/{state['run_id']}/{node['id']}",
+                _run_id=node["child_run_id"],
+            )
         except Conflict as exc:
             raise WorkflowBlocked("Child identity or pinned implementation conflict") from exc
         result = await child.describe()
@@ -195,8 +277,9 @@ class Engine:
             raise WorkflowBlocked(f"Child {child.run_id} is blocked")
 
     async def _rollover(self, state: State, node: State, now: float) -> bool:
-        if any(other["id"] != node["id"] and other["state"] in {"pending", "blocked"}
-               for other in state["nodes"].values()):
+        if any(
+            other["id"] != node["id"] and other["state"] in {"pending", "blocked"} for other in state["nodes"].values()
+        ):
             raise ProtocolError("Resolve outstanding operations before continue_as_new")
         definition = self.registry.resolve(f"{state['manifest']['name']}:v{state['manifest']['version']}")
         if definition.manifest != state["manifest"]:
@@ -217,6 +300,9 @@ class Engine:
         state = await self.store.load(self.namespace, run_id)
         if state["archived"] or state["status"] == "BLOCKED":
             return
+        if state["status"] not in TERMINAL | {"CANCELLING"} and self.registry.match_manifest(state["manifest"]) is None:
+            self.metrics["unsupported_activations"] += 1
+            return
         original, now = fingerprint(state), self.clock.now()
         try:
             for node in state["nodes"].values():
@@ -234,8 +320,14 @@ class Engine:
                 elif kind == "sleep" and node["due_at"] <= now:
                     finish_node(state, node, now)
                 elif kind == "signal":
-                    candidate = next((signal for signal in state["signals"]
-                                      if not signal["consumed"] and signal["name"] == node["spec"]["name"]), None)
+                    candidate = next(
+                        (
+                            signal
+                            for signal in state["signals"]
+                            if not signal["consumed"] and signal["name"] == node["spec"]["name"]
+                        ),
+                        None,
+                    )
                     if candidate is not None:
                         if candidate["schema"] != node["spec"]["schema"]:
                             raise ProtocolError("Buffered signal contract mismatch")
@@ -258,7 +350,7 @@ class Engine:
                     event(state, "cancelled", now)
             elif state["status"] not in TERMINAL and state["status"] != "BLOCKED":
                 definition = self.registry.resolve(f"{state['manifest']['name']}:v{state['manifest']['version']}")
-                activation = replay(definition, state)
+                activation = await self.replay_executor.execute(definition, state)
                 self.metrics["activations"] += 1
                 if activation.kind == "schedule":
                     await self._schedule(state, activation.value, now)
@@ -294,8 +386,9 @@ class Engine:
                     child_id = child["continued_run_id"]
                     child = await self.store.load(self.namespace, child_id)
                 if child["status"] not in TERMINAL | {"CANCELLING"}:
-                    await self.client.get_handle(child_id).cancel(actor="parent", reason="Parent closed",
-                                                                  request_id=f"parent-close/{run_id}")
+                    await self.client.get_handle(child_id).cancel(
+                        actor="parent", reason="Parent closed", request_id=f"parent-close/{run_id}"
+                    )
             except (Conflict, NotFound):
                 pass
 
@@ -307,8 +400,11 @@ class Engine:
                 for event_id, item in state["outbox"].items():
                     if item["delivered"] or item["lease_until"] > now:
                         continue
-                    if (item["metadata"]["kind"] != "wake"
-                            and state["status"] in {"CANCELLING", "CANCELLED", "TERMINATED"}):
+                    if item["metadata"]["kind"] != "wake" and state["status"] in {
+                        "CANCELLING",
+                        "CANCELLED",
+                        "TERMINATED",
+                    }:
                         item["delivered"], item["suppressed"] = True, True
                         continue
                     item["owner"], item["lease_until"] = owner, now + 30
@@ -321,8 +417,9 @@ class Engine:
                 return
             event_id, item = claimed
             try:
-                await self.transport.publish(item["topic"], canonical(item["payload"]).encode(),
-                                             {"duraflow": canonical(item["metadata"])})
+                await self.transport.publish(
+                    item["topic"], canonical(item["payload"]).encode(), {"duraflow": canonical(item["metadata"])}
+                )
             except Exception:
                 self.metrics["transport_errors"] += 1
 
@@ -370,3 +467,6 @@ class Engine:
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
             except TimeoutError:
                 pass
+
+    async def close(self) -> None:
+        await self.replay_executor.close()

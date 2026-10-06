@@ -1,0 +1,391 @@
+{
+  "actions": {},
+  "archived": false,
+  "blocked_reason": null,
+  "commands": [
+    {
+      "error": null,
+      "id": "0",
+      "members": [
+        "0.0"
+      ],
+      "result": 6,
+      "spec": {
+        "input": 3,
+        "kind": "call",
+        "options": {
+          "attempt_timeout": null,
+          "overall_timeout": null,
+          "retry": {
+            "delay": 1.0,
+            "exhausted": "raise",
+            "max_attempts": 1,
+            "max_delay": 60.0,
+            "multiplier": 2.0,
+            "retry_codes": [
+              "TASK_ERROR",
+              "ATTEMPT_TIMEOUT"
+            ]
+          },
+          "schedule_timeout": null
+        },
+        "ref": {
+          "input_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "name": "double",
+          "output_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "version": 1
+        }
+      },
+      "state": "done"
+    },
+    {
+      "error": null,
+      "id": "1",
+      "members": [
+        "1.0"
+      ],
+      "result": 12,
+      "spec": {
+        "input": 6,
+        "kind": "call",
+        "options": {
+          "attempt_timeout": null,
+          "overall_timeout": null,
+          "retry": {
+            "delay": 1.0,
+            "exhausted": "raise",
+            "max_attempts": 1,
+            "max_delay": 60.0,
+            "multiplier": 2.0,
+            "retry_codes": [
+              "TASK_ERROR",
+              "ATTEMPT_TIMEOUT"
+            ]
+          },
+          "schedule_timeout": null
+        },
+        "ref": {
+          "input_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "name": "double",
+          "output_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "version": 1
+        }
+      },
+      "state": "done"
+    }
+  ],
+  "continued_run_id": null,
+  "created_at": 1700000000.0,
+  "error": null,
+  "finished_at": 1700000000.0,
+  "history": [
+    {
+      "kind": "started",
+      "sequence": 1,
+      "time": 1700000000.0
+    },
+    {
+      "command_id": "0",
+      "kind": "command_scheduled",
+      "operation": "call",
+      "sequence": 2,
+      "time": 1700000000.0
+    },
+    {
+      "attempt": 1,
+      "epoch": 1,
+      "kind": "task_claimed",
+      "node_id": "0.0",
+      "sequence": 3,
+      "time": 1700000000.0
+    },
+    {
+      "attempt": 1,
+      "epoch": 1,
+      "kind": "task_observed",
+      "node_id": "0.0",
+      "sequence": 4,
+      "time": 1700000000.0
+    },
+    {
+      "code": null,
+      "kind": "operation_resolved",
+      "node_id": "0.0",
+      "outcome": "done",
+      "sequence": 5,
+      "time": 1700000000.0
+    },
+    {
+      "command_id": "0",
+      "kind": "command_resolved",
+      "outcome": "done",
+      "sequence": 6,
+      "time": 1700000000.0
+    },
+    {
+      "command_id": "1",
+      "kind": "command_scheduled",
+      "operation": "call",
+      "sequence": 7,
+      "time": 1700000000.0
+    },
+    {
+      "attempt": 1,
+      "epoch": 1,
+      "kind": "task_claimed",
+      "node_id": "1.0",
+      "sequence": 8,
+      "time": 1700000000.0
+    },
+    {
+      "attempt": 1,
+      "epoch": 1,
+      "kind": "task_observed",
+      "node_id": "1.0",
+      "sequence": 9,
+      "time": 1700000000.0
+    },
+    {
+      "code": null,
+      "kind": "operation_resolved",
+      "node_id": "1.0",
+      "outcome": "done",
+      "sequence": 10,
+      "time": 1700000000.0
+    },
+    {
+      "command_id": "1",
+      "kind": "command_resolved",
+      "outcome": "done",
+      "sequence": 11,
+      "time": 1700000000.0
+    },
+    {
+      "kind": "completed",
+      "sequence": 12,
+      "time": 1700000000.0
+    }
+  ],
+  "inbox": {
+    "workers/23dc6fa6-e37c-5c41-9509-1be5f9491358": "7466f05551c1f9ef85de9a64a1fbc39d5df19f6221faa67be0129012468b84b9",
+    "workers/881db58d-bbaf-5171-9658-5ce731c49ba1": "6f2e9067add3fdab791f864cedb6f44242e831fd0ec8419c9cf29355988a4449"
+  },
+  "input": 3,
+  "manifest": {
+    "build_id": "test-v1",
+    "input_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+    "name": "sequence",
+    "output_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+    "protocol_version": 1,
+    "replay_version": 1,
+    "version": 1
+  },
+  "namespace": "test",
+  "nodes": {
+    "0.0": {
+      "accepted_seq": 5,
+      "attempts": [
+        {
+          "created_at": 1700000000.0,
+          "deferred": null,
+          "dispatched": true,
+          "epoch": 1,
+          "last_dispatch": 1700000000.0,
+          "lease_until": 1700000030.0,
+          "not_before": 1700000000.0,
+          "number": 1,
+          "observation": {
+            "error": null,
+            "result": 6
+          },
+          "owner": "b90d8dcb-7e0e-4bc1-a7e5-cc1b9685ca79",
+          "progress": null,
+          "started_at": 1700000000.0
+        }
+      ],
+      "cancel_requested": false,
+      "created_at": 1700000000.0,
+      "error": null,
+      "id": "0.0",
+      "result": 6,
+      "spec": {
+        "input": 3,
+        "kind": "call",
+        "options": {
+          "attempt_timeout": null,
+          "overall_timeout": null,
+          "retry": {
+            "delay": 1.0,
+            "exhausted": "raise",
+            "max_attempts": 1,
+            "max_delay": 60.0,
+            "multiplier": 2.0,
+            "retry_codes": [
+              "TASK_ERROR",
+              "ATTEMPT_TIMEOUT"
+            ]
+          },
+          "schedule_timeout": null
+        },
+        "ref": {
+          "input_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "name": "double",
+          "output_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "version": 1
+        }
+      },
+      "state": "done",
+      "task_id": "714d0dee-f2d5-5e10-a05b-9dd3cf29e262"
+    },
+    "1.0": {
+      "accepted_seq": 10,
+      "attempts": [
+        {
+          "created_at": 1700000000.0,
+          "deferred": null,
+          "dispatched": true,
+          "epoch": 1,
+          "last_dispatch": 1700000000.0,
+          "lease_until": 1700000030.0,
+          "not_before": 1700000000.0,
+          "number": 1,
+          "observation": {
+            "error": null,
+            "result": 12
+          },
+          "owner": "b90d8dcb-7e0e-4bc1-a7e5-cc1b9685ca79",
+          "progress": null,
+          "started_at": 1700000000.0
+        }
+      ],
+      "cancel_requested": false,
+      "created_at": 1700000000.0,
+      "error": null,
+      "id": "1.0",
+      "result": 12,
+      "spec": {
+        "input": 6,
+        "kind": "call",
+        "options": {
+          "attempt_timeout": null,
+          "overall_timeout": null,
+          "retry": {
+            "delay": 1.0,
+            "exhausted": "raise",
+            "max_attempts": 1,
+            "max_delay": 60.0,
+            "multiplier": 2.0,
+            "retry_codes": [
+              "TASK_ERROR",
+              "ATTEMPT_TIMEOUT"
+            ]
+          },
+          "schedule_timeout": null
+        },
+        "ref": {
+          "input_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "name": "double",
+          "output_schema": "f0765dbf409c74f001806c446f2cf171d8c46b5b15779d54423dde921a4b0670",
+          "version": 1
+        }
+      },
+      "state": "done",
+      "task_id": "bf4fe26a-f5b7-50d5-af53-d1110ab192ab"
+    }
+  },
+  "outbox": {
+    "05749133-93f3-54c3-9d30-505953807567": {
+      "attempts": 1,
+      "created_at": 1700000000.0,
+      "delivered": true,
+      "lease_until": 0,
+      "metadata": {
+        "event_id": "05749133-93f3-54c3-9d30-505953807567",
+        "kind": "wake",
+        "namespace": "test",
+        "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+        "v": 1
+      },
+      "owner": "b68436c1-3ad6-493f-a7da-3b89ff63de47",
+      "payload": {},
+      "topic": "persistent://public/default/df-4-test-events"
+    },
+    "23dc6fa6-e37c-5c41-9509-1be5f9491358": {
+      "attempts": 1,
+      "created_at": 1700000000.0,
+      "delivered": true,
+      "lease_until": 0,
+      "metadata": {
+        "attempt": 1,
+        "event_id": "23dc6fa6-e37c-5c41-9509-1be5f9491358",
+        "kind": "task",
+        "namespace": "test",
+        "node_id": "1.0",
+        "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+        "v": 1
+      },
+      "owner": "5f02e0f6-cecc-4e90-90a9-dfe789c0c7e2",
+      "payload": 6,
+      "topic": "persistent://public/default/df-4-test-double-v1"
+    },
+    "342e0f66-99f9-5a41-ad29-456eb019da72": {
+      "attempts": 1,
+      "created_at": 1700000000.0,
+      "delivered": true,
+      "lease_until": 0,
+      "metadata": {
+        "event_id": "342e0f66-99f9-5a41-ad29-456eb019da72",
+        "kind": "wake",
+        "namespace": "test",
+        "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+        "v": 1
+      },
+      "owner": "342f9a3a-045d-405b-8397-64a10b625bb7",
+      "payload": {},
+      "topic": "persistent://public/default/df-4-test-events"
+    },
+    "881db58d-bbaf-5171-9658-5ce731c49ba1": {
+      "attempts": 1,
+      "created_at": 1700000000.0,
+      "delivered": true,
+      "lease_until": 0,
+      "metadata": {
+        "attempt": 1,
+        "event_id": "881db58d-bbaf-5171-9658-5ce731c49ba1",
+        "kind": "task",
+        "namespace": "test",
+        "node_id": "0.0",
+        "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+        "v": 1
+      },
+      "owner": "3f11a5ad-88e0-4ede-b36f-0e58bda11b8e",
+      "payload": 3,
+      "topic": "persistent://public/default/df-4-test-double-v1"
+    },
+    "a3ff0780-0b5e-55ca-8f93-b0013adeed08": {
+      "attempts": 1,
+      "created_at": 1700000000.0,
+      "delivered": true,
+      "lease_until": 0,
+      "metadata": {
+        "event_id": "a3ff0780-0b5e-55ca-8f93-b0013adeed08",
+        "kind": "wake",
+        "namespace": "test",
+        "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+        "v": 1
+      },
+      "owner": "04491906-ba2b-4a08-bfc8-2531de109089",
+      "payload": {},
+      "topic": "persistent://public/default/df-4-test-events"
+    }
+  },
+  "result": 13,
+  "revision": 19,
+  "run_id": "2b59b7d8-8905-4a66-9ada-50baf292f2ee",
+  "sequence": 12,
+  "signal_keys": {},
+  "signals": [],
+  "status": "COMPLETED",
+  "tags": [],
+  "workflow_id": "frozen-alpha"
+}

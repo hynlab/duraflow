@@ -1,4 +1,5 @@
 """Disposable coroutine activations. No I/O and no suspended stacks retained."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -7,9 +8,23 @@ from typing import Any, Callable, Generator, Generic, TypeVar, cast
 from uuid import UUID
 
 from .contracts import (
-    HandlerRef, NonDeterminism, ProtocolError, SignalRef, TaskFailure, TaskOptions,
-    TaskRef, TopicRef, UnsupportedWorkflow, WorkflowDefinition, WorkflowRef,
-    decode, duration, encode, fingerprint, schema_id,
+    CODEC_VERSION,
+    HandlerRef,
+    NonDeterminism,
+    ProtocolError,
+    SignalRef,
+    TaskFailure,
+    TaskOptions,
+    TaskRef,
+    TopicRef,
+    UnsupportedWorkflow,
+    WorkflowDefinition,
+    WorkflowRef,
+    decode,
+    duration,
+    encode,
+    fingerprint,
+    schema_id,
 )
 
 T = TypeVar("T")
@@ -23,8 +38,7 @@ class RaceResult:
 
 class BroadcastResult:
     def __init__(self, handlers: tuple[HandlerRef[Any, Any], ...], values: list[Any]):
-        self._values = {h.subscription: decode(v, h.task.output_type)
-                        for h, v in zip(handlers, values, strict=True)}
+        self._values = {h.subscription: decode(v, h.task.output_type) for h, v in zip(handlers, values, strict=True)}
 
     def __getitem__(self, handler: HandlerRef[Any, T]) -> T:
         return cast(T, self._values[handler.subscription])
@@ -33,8 +47,9 @@ class BroadcastResult:
 class Operation(Generic[T]):
     """A cold command descriptor, not an asyncio task or a running RPC."""
 
-    def __init__(self, context: WorkflowContext, spec: dict[str, Any],
-                 decoder: Callable[[Any], T] = lambda value: value):
+    def __init__(
+        self, context: WorkflowContext, spec: dict[str, Any], decoder: Callable[[Any], T] = lambda value: value
+    ):
         self.context, self.spec, self.decoder = context, spec, decoder
         self.used = False
 
@@ -62,9 +77,15 @@ class WorkflowContext:
         return Operation(self, spec, decoder)
 
     def call(self, ref: TaskRef[Any, T], value: Any, *, options: TaskOptions | None = None) -> Operation[T]:
-        return self._op({"kind": "call", "ref": ref.descriptor(), "input": encode(value, ref.input_type),
-                         "options": asdict(options or TaskOptions())},
-                        lambda result: decode(result, ref.output_type))
+        return self._op(
+            {
+                "kind": "call",
+                "ref": ref.descriptor(),
+                "input": encode(value, ref.input_type),
+                "options": asdict(options or TaskOptions()),
+            },
+            lambda result: decode(result, ref.output_type),
+        )
 
     def _group(self, kind: str, operations: tuple[Operation[Any], ...]) -> Operation[Any]:
         if not operations or len({id(op) for op in operations}) != len(operations):
@@ -91,9 +112,14 @@ class WorkflowContext:
     def race(self, *operations: Operation[Any]) -> Operation[RaceResult]:
         return self._group("race", operations)
 
-    def broadcast(self, topic: TopicRef[Any], value: Any, *,
-                  handlers: tuple[HandlerRef[Any, Any], ...],
-                  options: TaskOptions | None = None) -> Operation[BroadcastResult]:
+    def broadcast(
+        self,
+        topic: TopicRef[Any],
+        value: Any,
+        *,
+        handlers: tuple[HandlerRef[Any, Any], ...],
+        options: TaskOptions | None = None,
+    ) -> Operation[BroadcastResult]:
         if not handlers or len({h.subscription for h in handlers}) != len(handlers):
             raise ValueError("Broadcast requires distinct named subscriptions")
         payload = encode(value, topic.payload_type)
@@ -101,15 +127,35 @@ class WorkflowContext:
         for handler in handlers:
             if schema_id(topic.payload_type) != schema_id(handler.task.input_type):
                 raise ValueError("Broadcast handler input contract differs from topic contract")
-            members.append({"kind": "call", "ref": handler.task.descriptor(), "input": payload,
-                            "options": asdict(options or TaskOptions()), "handler": handler.subscription})
-        return self._op({"kind": "broadcast", "topic": topic.name,
-                         "payload_schema": schema_id(topic.payload_type), "input": payload, "members": members},
-                        lambda results: BroadcastResult(handlers, results))
+            members.append(
+                {
+                    "kind": "call",
+                    "ref": handler.task.descriptor(),
+                    "input": payload,
+                    "options": asdict(options or TaskOptions()),
+                    "handler": handler.subscription,
+                }
+            )
+        return self._op(
+            {
+                "kind": "broadcast",
+                "topic": topic.name,
+                "payload_schema": schema_id(topic.payload_type),
+                "input": payload,
+                "members": members,
+            },
+            lambda results: BroadcastResult(handlers, results),
+        )
 
     def publish(self, topic: TopicRef[Any], value: Any) -> Operation[str]:
-        return self._op({"kind": "publish", "topic": topic.name,
-                         "payload_schema": schema_id(topic.payload_type), "input": encode(value, topic.payload_type)})
+        return self._op(
+            {
+                "kind": "publish",
+                "topic": topic.name,
+                "payload_schema": schema_id(topic.payload_type),
+                "input": encode(value, topic.payload_type),
+            }
+        )
 
     def sleep(self, seconds: float) -> Operation[None]:
         duration(seconds)
@@ -117,8 +163,10 @@ class WorkflowContext:
 
     def wait_signal(self, ref: SignalRef[T], *, timeout: float | None = None) -> Operation[T]:
         duration(timeout)
-        return self._op({"kind": "signal", "name": ref.name, "schema": schema_id(ref.payload_type), "timeout": timeout},
-                        lambda value: decode(value, ref.payload_type))
+        return self._op(
+            {"kind": "signal", "name": ref.name, "schema": schema_id(ref.payload_type), "timeout": timeout},
+            lambda value: decode(value, ref.payload_type),
+        )
 
     def now(self) -> Operation[datetime]:
         return self._op({"kind": "now"}, datetime.fromisoformat)
@@ -126,10 +174,16 @@ class WorkflowContext:
     def uuid(self) -> Operation[UUID]:
         return self._op({"kind": "uuid"}, UUID)
 
-    def child(self, ref: WorkflowRef[Any, T], value: Any, *,
-              abandon_on_parent_close: bool = False) -> Operation[T]:
-        return self._op({"kind": "child", "ref": ref.descriptor(), "input": encode(value, ref.input_type),
-                         "abandon": abandon_on_parent_close}, lambda result: decode(result, ref.output_type))
+    def child(self, ref: WorkflowRef[Any, T], value: Any, *, abandon_on_parent_close: bool = False) -> Operation[T]:
+        return self._op(
+            {
+                "kind": "child",
+                "ref": ref.descriptor(),
+                "input": encode(value, ref.input_type),
+                "abandon": abandon_on_parent_close,
+            },
+            lambda result: decode(result, ref.output_type),
+        )
 
     def continue_as_new(self, value: Any) -> Operation[None]:
         return self._op({"kind": "continue", "input": encode(value)})
@@ -142,6 +196,8 @@ class Activation:
 
 
 def replay(definition: WorkflowDefinition, state: dict[str, Any], *, max_steps: int = 10_000) -> Activation:
+    if state.get("codec_version", 1) != CODEC_VERSION:
+        raise ProtocolError("Unsupported durable codec version")
     if state["manifest"] != definition.manifest:
         raise NonDeterminism("Pinned implementation/codec/runtime identity does not match")
     ctx = WorkflowContext()

@@ -1,4 +1,5 @@
 """Run after installing the project: python examples/quickstart.py."""
+
 import asyncio
 
 from duraflow import Registry, TaskRef, WorkflowContext, task, workflow

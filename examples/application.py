@@ -1,4 +1,5 @@
 """Generic example application; contracts can live in a separate worker package."""
+
 from duraflow import BroadcastBinding, HandlerRef, Registry, TaskRef, TopicRef, WorkflowContext, task, workflow
 
 VALUE = TopicRef("persistent://public/default/example-product", int)

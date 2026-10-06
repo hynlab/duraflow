@@ -1,4 +1,5 @@
 """Generated invariants, enabled by the dev extra."""
+
 import pytest
 
 pytest.importorskip("hypothesis")
