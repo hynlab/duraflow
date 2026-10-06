@@ -17,5 +17,4 @@ class Receipt:
 
 
 def sample() -> Receipt:
-    return Receipt(datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
-                   [Line("sample", Decimal("12.340"))], None)
+    return Receipt(datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), [Line("sample", Decimal("12.340"))], None)

@@ -1,4 +1,5 @@
 """Private JSON replay worker. Only a configured trusted app can register code."""
+
 from __future__ import annotations
 
 import argparse

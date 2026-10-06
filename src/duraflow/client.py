@@ -28,6 +28,7 @@ from .contracts import (
 )
 from .state import attempt, event, mutate, new_run, wake
 from .storage import State, Store
+from .lifecycle import record_observation
 
 
 class Client:
@@ -146,21 +147,20 @@ class Client:
                 or not hmac.compare_digest(deferred["token_hash"], digest)
             ):
                 raise Conflict("Completion token is invalid or superseded")
+            now = self.clock.now()
             if current["observation"] is not None:
-                if fingerprint(current["observation"]) != fingerprint(observation):
-                    raise Conflict("Conflicting repeated completion")
-                return False
+                return record_observation(state, node, observation, now, kind="external_observation")
             if (
                 node["state"] != "pending"
                 or state["status"] in (TERMINAL - {"COMPLETED", "FAILED"})
                 or state["status"] == "CANCELLING"
-                or deferred["expires_at"] <= self.clock.now()
+                or deferred["expires_at"] <= now
             ):
                 raise Conflict("Delegated invocation no longer accepts completion")
-            current["observation"] = observation
-            event(state, "external_observation", self.clock.now(), node_id=node_id)
-            wake(state, f"external/{node_id}/{number_int}/{epoch_int}", self.clock.now())
-            return True
+            changed = record_observation(state, node, observation, now, kind="external_observation")
+            if changed:
+                wake(state, f"external/{node_id}/{number_int}/{epoch_int}", now)
+            return changed
 
         return bool(await mutate(self.store, self.namespace, run_id, change))
 
@@ -254,6 +254,8 @@ class WorkflowHandle:
                 for node in state["nodes"].values():
                     if node["state"] in {"pending", "blocked"}:
                         node["cancel_requested"] = True
+                        node["cancel_policy"] = 2
+                        node.setdefault("cancel_requested_seq", state["sequence"] + 1)
                         if node["state"] == "blocked":
                             node["state"] = "pending"
                 if action == "terminate":

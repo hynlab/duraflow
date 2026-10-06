@@ -14,6 +14,7 @@ from typing import Any
 from .client import Client
 from .contracts import DuraflowError, Registry, decode, parse_json
 from .coordinator import Engine
+from .executor import ProcessReplayExecutor
 from .runner import Worker
 from .storage import SQLiteStore, Store
 from .transport import PulsarTransport
@@ -107,6 +108,8 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
         if args.command == "engine"
         else Worker(store, transport, registry, namespace=args.namespace, broadcasts=getattr(app, "broadcasts", ()))
     )
+    if isinstance(runtime, Engine):
+        runtime.replay_executor = ProcessReplayExecutor(args.app)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -127,8 +130,7 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
         if not running.done():
             running.cancel()
         await asyncio.gather(running, requested, return_exceptions=True)
-        if isinstance(runtime, Worker):
-            await runtime.close()
+        await runtime.close()
         await transport.close()
     return {"stopped": True}
 

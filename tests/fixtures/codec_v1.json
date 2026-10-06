@@ -1,0 +1,13 @@
+{
+  "schema": "869073634781eead4b5ada2c8efa782274694198f90fd9d39ae6d006d885f0fa",
+  "payload": {
+    "issued": "2026-01-02T03:04:05Z",
+    "lines": [
+      {
+        "name": "sample",
+        "amount": "12.340"
+      }
+    ],
+    "note": null
+  }
+}

@@ -1,4 +1,5 @@
 """Bounded replay fault containment. This is not a hostile-code sandbox."""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,8 +7,14 @@ import sys
 from typing import Protocol
 
 from .contracts import (
-    NonDeterminism, ProtocolError, UnsupportedWorkflow, WorkflowBlocked,
-    WorkflowDefinition, canonical, duration, parse_json,
+    NonDeterminism,
+    ProtocolError,
+    UnsupportedWorkflow,
+    WorkflowBlocked,
+    WorkflowDefinition,
+    canonical,
+    duration,
+    parse_json,
 )
 from .replay import Activation, replay
 from .storage import State
@@ -36,8 +43,15 @@ class ProcessReplayExecutor:
     A watchdog kills a stuck activation including stuck coroutine finalizers.
     """
 
-    def __init__(self, app: str, *, workers: int = 2, timeout: float = 5.0,
-                 startup_timeout: float = 15.0, max_bytes: int = 16 * 1024 * 1024):
+    def __init__(
+        self,
+        app: str,
+        *,
+        workers: int = 2,
+        timeout: float = 5.0,
+        startup_timeout: float = 15.0,
+        max_bytes: int = 16 * 1024 * 1024,
+    ):
         if not app or any(not part.isidentifier() for part in app.split(".")):
             raise ValueError("An importable trusted application module is required")
         if not 1 <= workers <= 32 or not 1024 <= max_bytes <= 64 * 1024 * 1024:
@@ -64,10 +78,17 @@ class ProcessReplayExecutor:
 
     async def _start(self) -> asyncio.subprocess.Process:
         process = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "duraflow.replay_child", "--app", self.app,
-            "--max-bytes", str(self.max_bytes),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, limit=self.max_bytes + 1,
+            sys.executable,
+            "-m",
+            "duraflow.replay_child",
+            "--app",
+            self.app,
+            "--max-bytes",
+            str(self.max_bytes),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            limit=self.max_bytes + 1,
         )
         self._processes.add(process)
         try:
@@ -106,6 +127,8 @@ class ProcessReplayExecutor:
                     raise WorkflowBlocked("REPLAY_EXECUTOR_INVALID_RESPONSE")
                 response = parse_json(raw)
                 if not isinstance(response, dict) or type(response.get("ok")) is not bool:
+                    raise WorkflowBlocked("REPLAY_EXECUTOR_INVALID_RESPONSE")
+                if response["ok"] and response.get("kind") not in {"schedule", "waiting", "completed", "failed"}:
                     raise WorkflowBlocked("REPLAY_EXECUTOR_INVALID_RESPONSE")
                 self._idle.append(process)
                 process = None

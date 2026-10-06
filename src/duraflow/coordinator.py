@@ -24,7 +24,8 @@ from .contracts import (
     fingerprint,
     name,
 )
-from .replay import replay
+from .executor import InlineReplayExecutor, ReplayExecutor
+from .lifecycle import accepted_before_cancel, deadline_error
 from .state import attempt, event, finish_node, identity, mutate, new_run, outbox, route, subscription
 from .storage import State, Store, clone
 from .transport import Transport
@@ -37,34 +38,34 @@ def error_data(code: str, message: str | None = None) -> dict[str, Any]:
 
 
 def settle_task(state: State, node: State, now: float) -> None:
-    """Pure task transition; caller commits the decision with an expected revision."""
+    """Legacy ordering is retained; new runs decide deadlines at result acceptance."""
     current, options = node["attempts"][-1], node["spec"]["options"]
     observation = current["observation"]
+    versioned = state.get("lifecycle_version", 1) >= 2
+    decision_time = observation.get("recorded_at", now) if versioned and observation is not None else now
+    cancel = node.get("cancel_requested") and not (versioned and accepted_before_cancel(node))
+    orphan = (
+        node.get("cancel_policy", 1) >= 2
+        and current["started_at"] is not None
+        and observation is None
+        and (current["lease_until"] <= now or current["deferred"] is not None)
+    )
     error = None
     if state["status"] == "TERMINATED":
         error = error_data("TERMINATED")
-    elif node.get("cancel_requested") and (current["started_at"] is None or observation is not None):
+    elif cancel and (current["started_at"] is None or observation is not None or orphan):
         error = error_data("CANCELLED")
-    elif options["overall_timeout"] is not None and now >= node["created_at"] + options["overall_timeout"]:
-        error = error_data("OVERALL_TIMEOUT")
-    elif (
-        options["attempt_timeout"] is not None
-        and current["started_at"] is not None
-        and now >= current["started_at"] + options["attempt_timeout"]
-    ):
-        error = error_data("ATTEMPT_TIMEOUT")
-    elif (
-        options["schedule_timeout"] is not None
-        and current["started_at"] is None
-        and now >= current["not_before"] + options["schedule_timeout"]
-    ):
-        error = error_data("SCHEDULE_TIMEOUT")
-    elif current["deferred"] is not None and now >= current["deferred"]["expires_at"]:
-        error = error_data("DELEGATION_TIMEOUT")
-    elif observation is not None:
-        error = observation["error"]
+        if orphan:
+            node["external_outcome"] = "unknown"
+            current["epoch"] += 1
+            current["owner"], current["lease_until"] = None, 0
+            event(state, "cancellation_owner_lost", now, node_id=node["id"], external_outcome="unknown")
     else:
-        return
+        error = deadline_error(node, decision_time)
+        if error is None:
+            if observation is None:
+                return
+            error = observation["error"]
     if error is None:
         finish_node(state, node, now, result=observation["result"])
         return
@@ -132,6 +133,7 @@ class Engine:
         batch_size: int = 100,
         max_commands: int = 1000,
         reconcile_interval: float = 10.0,
+        replay_executor: ReplayExecutor | None = None,
     ):
         duration(reconcile_interval)
         if not 1 <= batch_size <= 1000 or not 1 <= max_commands <= 10000:
@@ -140,8 +142,15 @@ class Engine:
         self.namespace, self.clock = name(namespace), clock or Clock()
         self.batch_size, self.max_commands = batch_size, max_commands
         self.reconcile_interval, self.cursor = reconcile_interval, ""
+        self.replay_executor = replay_executor or InlineReplayExecutor()
         self.client = Client(store, registry, namespace=namespace, clock=self.clock)
-        self.metrics = {"activations": 0, "cas_conflicts": 0, "publications": 0, "transport_errors": 0}
+        self.metrics = {
+            "activations": 0,
+            "cas_conflicts": 0,
+            "publications": 0,
+            "transport_errors": 0,
+            "unsupported_activations": 0,
+        }
 
     async def _schedule(self, state: State, spec: dict[str, Any], now: float) -> None:
         if len(state["commands"]) >= self.max_commands:
@@ -291,6 +300,9 @@ class Engine:
         state = await self.store.load(self.namespace, run_id)
         if state["archived"] or state["status"] == "BLOCKED":
             return
+        if state["status"] not in TERMINAL | {"CANCELLING"} and self.registry.match_manifest(state["manifest"]) is None:
+            self.metrics["unsupported_activations"] += 1
+            return
         original, now = fingerprint(state), self.clock.now()
         try:
             for node in state["nodes"].values():
@@ -338,7 +350,7 @@ class Engine:
                     event(state, "cancelled", now)
             elif state["status"] not in TERMINAL and state["status"] != "BLOCKED":
                 definition = self.registry.resolve(f"{state['manifest']['name']}:v{state['manifest']['version']}")
-                activation = replay(definition, state)
+                activation = await self.replay_executor.execute(definition, state)
                 self.metrics["activations"] += 1
                 if activation.kind == "schedule":
                     await self._schedule(state, activation.value, now)
@@ -455,3 +467,6 @@ class Engine:
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
             except TimeoutError:
                 pass
+
+    async def close(self) -> None:
+        await self.replay_executor.close()

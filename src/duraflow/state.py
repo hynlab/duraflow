@@ -83,6 +83,8 @@ def new_run(
         "run_id": run_id,
         "workflow_id": workflow_id,
         "manifest": definition.manifest,
+        "lifecycle_version": 2,
+        "codec_version": 1,
         "input": clone(value),
         "revision": 0,
         "status": "PENDING",

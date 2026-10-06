@@ -34,6 +34,7 @@ from .contracts import (
 from .state import event, mutate, route, subscription, wake
 from .storage import State, Store, clone
 from .transport import Delivery, Transport
+from .lifecycle import record_observation
 
 log = logging.getLogger("duraflow.worker")
 
@@ -182,6 +183,8 @@ class Worker:
         digest, now = fingerprint([payload, meta]), self.clock.now()
 
         def change(state: State) -> Any:
+            if state.get("codec_version", 1) != 1:
+                raise ProtocolError("Unsupported durable codec version")
             if state["archived"]:
                 return None
             node = state["nodes"].get(node_id)
@@ -238,22 +241,11 @@ class Worker:
 
         def change(state: State) -> None:
             current = context._current(state)
-            if current["lease_until"] <= self.clock.now() and current["deferred"] is None:
+            now = self.clock.now()
+            if current["lease_until"] <= now and current["deferred"] is None:
                 raise Conflict("Cannot record an outcome after lease expiry")
-            if current["observation"] is not None:
-                if fingerprint(current["observation"]) != fingerprint(observation):
-                    raise Conflict("Conflicting observation")
-                return
-            current["observation"] = observation
-            event(
-                state,
-                "task_observed",
-                self.clock.now(),
-                node_id=context.node_id,
-                attempt=context.attempt,
-                epoch=context.lease_epoch,
-            )
-            wake(state, f"observation/{context.node_id}/{context.attempt}/{context.lease_epoch}", self.clock.now())
+            if record_observation(state, state["nodes"][context.node_id], observation, now, kind="task_observed"):
+                wake(state, f"observation/{context.node_id}/{context.attempt}/{context.lease_epoch}", now)
 
         try:
             await mutate(self.store, self.namespace, context.run_id, change)

@@ -8,6 +8,7 @@ from typing import Any, Callable, Generator, Generic, TypeVar, cast
 from uuid import UUID
 
 from .contracts import (
+    CODEC_VERSION,
     HandlerRef,
     NonDeterminism,
     ProtocolError,
@@ -195,6 +196,8 @@ class Activation:
 
 
 def replay(definition: WorkflowDefinition, state: dict[str, Any], *, max_steps: int = 10_000) -> Activation:
+    if state.get("codec_version", 1) != CODEC_VERSION:
+        raise ProtocolError("Unsupported durable codec version")
     if state["manifest"] != definition.manifest:
         raise NonDeterminism("Pinned implementation/codec/runtime identity does not match")
     ctx = WorkflowContext()

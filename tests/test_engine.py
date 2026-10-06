@@ -267,7 +267,8 @@ async def test_changed_command_and_missing_version_block() -> None:
             replay(Registry(changed).resolve(changed), await h.describe())
         env.engine.registry = Registry()
         await env.engine.tick()
-        assert (await h.describe())["status"] == "BLOCKED"
+        assert (await h.describe())["status"] == "WAITING"
+        assert env.engine.metrics["unsupported_activations"] == 1
 
 
 async def test_early_return_against_history_blocks() -> None:

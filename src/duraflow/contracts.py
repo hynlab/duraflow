@@ -22,6 +22,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 MAX_PAYLOAD_BYTES = 262_144
 PROTOCOL_VERSION = 1
 REPLAY_VERSION = 1
+CODEC_VERSION = 1
 TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELLED", "TERMINATED", "CONTINUED"})
 
 
@@ -348,6 +349,12 @@ class Registry:
             return self.workflows[key]
         except KeyError:
             raise WorkflowBlocked(f"Missing workflow implementation: {key}") from None
+
+    def match_manifest(self, manifest: dict[str, Any]) -> WorkflowDefinition | None:
+        definition = self.workflows.get(f"{manifest.get('name')}:v{manifest.get('version')}")
+        if definition is None or definition.manifest != manifest:
+            return None
+        return definition
 
 
 class Clock:

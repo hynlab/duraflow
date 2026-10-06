@@ -13,8 +13,13 @@ test:
 integration:
 	PYTHONPATH=src:. pytest -m integration -v
 native-check:
+	python scripts/codec_matrix.py
 	DURAFLOW_REQUIRE_NATIVE=1 PYTHONPATH=src:. pytest -v --cov=duraflow --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=native-results.xml
 production-gate:
 	python scripts/production_gate.py coverage.json
 build:
 	python -m build
+
+.PHONY: codec-check
+codec-check:
+	python scripts/codec_matrix.py

@@ -1,4 +1,5 @@
 """Versioned outcome acceptance and deadline ordering for durable task attempts."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,8 +15,11 @@ def deadline_error(node: State, when: float) -> dict[str, Any] | None:
     checks = [
         ("OVERALL_TIMEOUT", options["overall_timeout"], node["created_at"]),
         ("ATTEMPT_TIMEOUT", options["attempt_timeout"], current["started_at"]),
-        ("SCHEDULE_TIMEOUT", options["schedule_timeout"] if current["started_at"] is None else None,
-         current["not_before"]),
+        (
+            "SCHEDULE_TIMEOUT",
+            options["schedule_timeout"] if current["started_at"] is None else None,
+            current["not_before"],
+        ),
     ]
     for code, duration, start in checks:
         if duration is not None and start is not None and when >= start + duration:
@@ -39,8 +43,7 @@ def record_observation(state: State, node: State, observation: State, now: float
         if fingerprint(previous_value) != fingerprint(observation):
             raise Conflict("Conflicting repeated observation")
         return False
-    sequence = event(state, kind, now, node_id=node["id"],
-                     attempt=current["number"], epoch=current["epoch"])
+    sequence = event(state, kind, now, node_id=node["id"], attempt=current["number"], epoch=current["epoch"])
     current["observation"] = clone(observation)
     if state.get("lifecycle_version", 1) >= 2:
         current["observation"].update(recorded_at=now, sequence=sequence)
@@ -49,5 +52,8 @@ def record_observation(state: State, node: State, observation: State, now: float
 
 def accepted_before_cancel(node: State) -> bool:
     observation = node["attempts"][-1]["observation"]
-    return bool(observation is not None and "sequence" in observation
-                and observation["sequence"] < node.get("cancel_requested_seq", -1))
+    return bool(
+        observation is not None
+        and "sequence" in observation
+        and observation["sequence"] < node.get("cancel_requested_seq", -1)
+    )

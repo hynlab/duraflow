@@ -1,4 +1,5 @@
 """Importable adversarial workflows for isolated replay regression tests."""
+
 from duraflow import Registry, WorkflowContext, workflow
 
 
