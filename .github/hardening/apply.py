@@ -10,3 +10,5 @@ if stage not in {'baseline', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', '
 runpy.run_path(str(Path('.github/hardening') / (stage + '.py')), run_name='__main__')
 if stage == 'phase1':
     runpy.run_path('.github/hardening/phase1_after.py', run_name='__main__')
+    matrix = Path('scripts/codec_matrix.py')
+    matrix.write_text(matrix.read_text().replace('import sys\n', ''))
