@@ -1,1 +1,1 @@
-{"stage":"phase2","message":"feat: add transactional migrations and indexed authoritative-time scheduling (B01-B04)"}
+{"stage":"phase3","message":"feat: add validated service supervision, operational probes and audited DLQ replay (C01-C06)"}
