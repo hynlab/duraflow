@@ -12,7 +12,11 @@ jobs:
   verify-stage:
     if: github.repository == 'hynlab/duraflow'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: duraflow-qualification-${{ github.run_id }}
+      DURAFLOW_TEST_POSTGRES: postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow
+      DURAFLOW_TEST_PULSAR: pulsar://localhost:6650
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,10 +33,11 @@ jobs:
           make check
       - run: docker compose up -d --wait --wait-timeout 240
       - name: Required native tests
-        env:
-          DURAFLOW_TEST_POSTGRES: postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow
-          DURAFLOW_TEST_PULSAR: pulsar://localhost:6650
         run: make native-check
+      - name: Isolated native crash and recovery qualification
+        env:
+          DURAFLOW_ALLOW_DESTRUCTIVE_TESTS: isolated-compose
+        run: make native-fault-check
       - run: python -m build && python -m twine check --strict dist/*
       - name: Commit only the verified stage
         env:
@@ -59,6 +64,8 @@ jobs:
             coverage.json
             test-results.xml
             native-results.xml
+            fault-results.xml
+            qualification-results.json
           if-no-files-found: ignore
       - if: always()
         run: docker compose down -v
