@@ -1,4 +1,5 @@
 """Trusted shared-store SDK; no HTTP server or implicit worker implementation imports."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,23 +9,44 @@ from typing import Any
 from uuid import uuid4
 
 from .contracts import (
-    Archived, Clock, Conflict, Registry, SignalRef, TERMINAL, TaskFailure,
-    TaskRef, WorkflowBlocked, WorkflowFailed, decode, duration, encode, fingerprint,
-    name, schema_id,
+    Archived,
+    Clock,
+    Conflict,
+    Registry,
+    SignalRef,
+    TERMINAL,
+    TaskFailure,
+    TaskRef,
+    WorkflowBlocked,
+    WorkflowFailed,
+    decode,
+    duration,
+    encode,
+    fingerprint,
+    name,
+    schema_id,
 )
 from .state import attempt, event, mutate, new_run, wake
 from .storage import State, Store
 
 
 class Client:
-    def __init__(self, store: Store, registry: Registry | None = None, *,
-                 namespace: str = "default", clock: Clock | None = None):
+    def __init__(
+        self, store: Store, registry: Registry | None = None, *, namespace: str = "default", clock: Clock | None = None
+    ):
         self.store, self.registry = store, registry or Registry()
         self.namespace, self.clock = name(namespace), clock or Clock()
 
-    async def start(self, workflow: Any, value: Any, *, request_id: str,
-                    workflow_id: str | None = None, tags: tuple[str, ...] = (),
-                    _run_id: str | None = None) -> WorkflowHandle:
+    async def start(
+        self,
+        workflow: Any,
+        value: Any,
+        *,
+        request_id: str,
+        workflow_id: str | None = None,
+        tags: tuple[str, ...] = (),
+        _run_id: str | None = None,
+    ) -> WorkflowHandle:
         if not request_id or len(request_id) > 256:
             raise ValueError("request_id must contain 1..256 characters")
         workflow_id = workflow_id or request_id
@@ -35,8 +57,7 @@ class Client:
         definition = self.registry.resolve(workflow)
         value = encode(value, definition.ref.input_type)
         digest = fingerprint([definition.manifest, workflow_id, value, sorted(set(tags))])
-        state = new_run(definition, self.namespace, _run_id or str(uuid4()), workflow_id,
-                        value, self.clock.now(), tags)
+        state = new_run(definition, self.namespace, _run_id or str(uuid4()), workflow_id, value, self.clock.now(), tags)
         saved = await self.store.create(state, request_id, digest)
         return WorkflowHandle(self, saved["run_id"], definition.ref.output_type)
 
@@ -59,8 +80,17 @@ class Client:
             cursor = rows[-1]["run_id"]
         return result
 
-    async def control_tagged(self, action: str, *, tags: tuple[str, ...], actor: str, reason: str,
-                             request_id: str, after: str = "", limit: int = 100) -> dict[str, Any]:
+    async def control_tagged(
+        self,
+        action: str,
+        *,
+        tags: tuple[str, ...],
+        actor: str,
+        reason: str,
+        request_id: str,
+        after: str = "",
+        limit: int = 100,
+    ) -> dict[str, Any]:
         if action not in {"cancel", "terminate", "resume"} or not tags or not request_id:
             raise ValueError("Specify tags, a request_id and cancel/terminate/resume")
         if len(request_id) > 128:
@@ -70,8 +100,7 @@ class Client:
         for row in snapshot:
             handle = self.get_handle(row["run_id"])
             try:
-                await handle._control(action, actor=actor, reason=reason,
-                                      request_id=f"{request_id}/{row['run_id']}")
+                await handle._control(action, actor=actor, reason=reason, request_id=f"{request_id}/{row['run_id']}")
                 outcomes[row["run_id"]] = "accepted"
             except Conflict:
                 outcomes[row["run_id"]] = "conflict"
@@ -90,16 +119,19 @@ class Client:
                 run_id = state["continued_run_id"]
         raise Conflict("Too many concurrent rollovers")
 
-    async def complete_external(self, token: str, value: Any = None, *, ref: TaskRef[Any, Any],
-                                error: dict[str, Any] | None = None) -> bool:
+    async def complete_external(
+        self, token: str, value: Any = None, *, ref: TaskRef[Any, Any], error: dict[str, Any] | None = None
+    ) -> bool:
         try:
             run_id, node_id, number, epoch, _ = token.split("/", 4)
             number_int, epoch_int = int(number), int(epoch)
         except (ValueError, AttributeError):
             raise ValueError("Invalid completion token") from None
         digest = hashlib.sha256(token.encode()).hexdigest()
-        observation = {"result": encode(value, ref.output_type) if error is None else None,
-                       "error": TaskFailure(error).error if error is not None else None}
+        observation = {
+            "result": encode(value, ref.output_type) if error is None else None,
+            "error": TaskFailure(error).error if error is not None else None,
+        }
 
         def change(state: State) -> bool:
             node = state["nodes"].get(node_id)
@@ -107,20 +139,29 @@ class Client:
                 raise Conflict("Unknown or incompatible delegated invocation")
             current = node["attempts"][-1]
             deferred = current.get("deferred")
-            if (current["number"] != number_int or current["epoch"] != epoch_int or not deferred
-                    or not hmac.compare_digest(deferred["token_hash"], digest)):
+            if (
+                current["number"] != number_int
+                or current["epoch"] != epoch_int
+                or not deferred
+                or not hmac.compare_digest(deferred["token_hash"], digest)
+            ):
                 raise Conflict("Completion token is invalid or superseded")
             if current["observation"] is not None:
                 if fingerprint(current["observation"]) != fingerprint(observation):
                     raise Conflict("Conflicting repeated completion")
                 return False
-            if (node["state"] != "pending" or state["status"] in (TERMINAL - {"COMPLETED", "FAILED"})
-                    or state["status"] == "CANCELLING" or deferred["expires_at"] <= self.clock.now()):
+            if (
+                node["state"] != "pending"
+                or state["status"] in (TERMINAL - {"COMPLETED", "FAILED"})
+                or state["status"] == "CANCELLING"
+                or deferred["expires_at"] <= self.clock.now()
+            ):
                 raise Conflict("Delegated invocation no longer accepts completion")
             current["observation"] = observation
             event(state, "external_observation", self.clock.now(), node_id=node_id)
             wake(state, f"external/{node_id}/{number_int}/{epoch_int}", self.clock.now())
             return True
+
         return bool(await mutate(self.store, self.namespace, run_id, change))
 
 
@@ -139,8 +180,9 @@ class WorkflowHandle:
             raise Archived(self.run_id)
         return [row for row in state["history"] if row["sequence"] > after][:limit]
 
-    async def result(self, *, timeout: float | None = None, poll_interval: float = 0.1,
-                     follow_continued: bool = False) -> Any:
+    async def result(
+        self, *, timeout: float | None = None, poll_interval: float = 0.1, follow_continued: bool = False
+    ) -> Any:
         duration(poll_interval)
 
         async def wait() -> Any:
@@ -158,6 +200,7 @@ class WorkflowHandle:
                 elif state["status"] in TERMINAL:
                     raise WorkflowFailed(f"{state['status']}: {state['error']}")
                 await asyncio.sleep(poll_interval)
+
         async with asyncio.timeout(timeout):
             return await wait()
 
@@ -184,12 +227,13 @@ class WorkflowHandle:
             state["signals"].append({**descriptor, "sequence": sequence, "consumed": False})
             state["signal_keys"][signal_id] = digest
             wake(state, f"signal/{signal_id}", self.client.clock.now())
+
         await mutate(self.client.store, self.client.namespace, self.run_id, change)
 
-    async def _control(self, action: str, *, actor: str, reason: str, request_id: str,
-                       node_id: str | None = None) -> None:
-        if (not actor or not reason or not request_id or len(actor) > 128
-                or len(reason) > 1000 or len(request_id) > 256):
+    async def _control(
+        self, action: str, *, actor: str, reason: str, request_id: str, node_id: str | None = None
+    ) -> None:
+        if not actor or not reason or not request_id or len(actor) > 128 or len(reason) > 1000 or len(request_id) > 256:
             raise ValueError("Controls require bounded actor, reason and request_id")
         if action not in {"cancel", "terminate", "resume", "retry"}:
             raise ValueError("Unsupported operator action")
@@ -216,7 +260,9 @@ class WorkflowHandle:
                     state["finished_at"] = now
             elif action == "resume":
                 if state["status"] != "BLOCKED" or any(n["state"] == "blocked" for n in state["nodes"].values()):
-                    raise Conflict("Resume requires a blocked execution without an exhausted task; retry that task first")
+                    raise Conflict(
+                        "Resume requires a blocked execution without an exhausted task; retry that task first"
+                    )
                 state["status"], state["blocked_reason"] = "WAITING", None
             elif action == "retry":
                 node = state["nodes"].get(node_id)
@@ -231,6 +277,7 @@ class WorkflowHandle:
             state["actions"][request_id] = digest
             event(state, "operator_action", now, action=action, actor=actor, reason=reason, node_id=node_id)
             wake(state, f"control/{request_id}", self.client.clock.now())
+
         await mutate(self.client.store, self.client.namespace, self.run_id, change)
 
     async def cancel(self, *, actor: str, reason: str, request_id: str) -> None:
@@ -254,10 +301,13 @@ class WorkflowHandle:
         def change(state: State) -> None:
             if state["archived"]:
                 return
-            if (state["status"] not in TERMINAL or state["finished_at"] is None
-                    or self.client.clock.now() - state["finished_at"] < retention
-                    or any(not msg["delivered"] for msg in state["outbox"].values())
-                    or any(node["state"] in {"pending", "blocked"} for node in state["nodes"].values())):
+            if (
+                state["status"] not in TERMINAL
+                or state["finished_at"] is None
+                or self.client.clock.now() - state["finished_at"] < retention
+                or any(not msg["delivered"] for msg in state["outbox"].values())
+                or any(node["state"] in {"pending", "blocked"} for node in state["nodes"].values())
+            ):
                 raise Conflict("Run is not safe to archive")
             state["archived"] = True
             state["input"], state["result"] = None, None
@@ -266,4 +316,5 @@ class WorkflowHandle:
             for key in ("nodes", "outbox", "inbox"):
                 state[key] = {}
             event(state, "archived", self.client.clock.now(), actor=actor, reason=reason)
+
         await mutate(self.client.store, self.client.namespace, self.run_id, change)

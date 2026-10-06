@@ -1,4 +1,5 @@
 """Public typed contracts and strict JSON boundaries; no infrastructure imports."""
+
 from __future__ import annotations
 
 import hashlib
@@ -215,8 +216,12 @@ class TaskRef(Generic[InputT, OutputT]):
         return f"{self.name}:v{self.version}"
 
     def descriptor(self) -> dict[str, Any]:
-        return {"name": self.name, "version": self.version,
-                "input_schema": schema_id(self.input_type), "output_schema": schema_id(self.output_type)}
+        return {
+            "name": self.name,
+            "version": self.version,
+            "input_schema": schema_id(self.input_type),
+            "output_schema": schema_id(self.output_type),
+        }
 
 
 @dataclass(frozen=True)
@@ -260,12 +265,17 @@ class WorkflowDefinition:
 
     @property
     def manifest(self) -> dict[str, Any]:
-        return {**self.ref.descriptor(), "build_id": self.build_id,
-                "replay_version": REPLAY_VERSION, "protocol_version": PROTOCOL_VERSION}
+        return {
+            **self.ref.descriptor(),
+            "build_id": self.build_id,
+            "replay_version": REPLAY_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+        }
 
 
-def workflow(*, name: str, version: int = 1, build_id: str | None = None,
-             input_type: Any = None, output_type: Any = None) -> Callable[[F], F]:
+def workflow(
+    *, name: str, version: int = 1, build_id: str | None = None, input_type: Any = None, output_type: Any = None
+) -> Callable[[F], F]:
     def decorate(fn: F) -> F:
         if not inspect.iscoroutinefunction(fn):
             raise TypeError("Workflows must be async functions")
@@ -293,6 +303,7 @@ def workflow(*, name: str, version: int = 1, build_id: str | None = None,
         ident = build_id or hashlib.sha256(source.encode()).hexdigest()
         setattr(fn, "__duraflow_workflow__", WorkflowDefinition(ref, fn, ident))
         return fn
+
     return decorate
 
 
@@ -304,6 +315,7 @@ def task(*, ref: TaskRef[Any, Any]) -> Callable[[F], F]:
         ref.descriptor()
         setattr(fn, "__duraflow_task__", ref)
         return fn
+
     return decorate
 
 

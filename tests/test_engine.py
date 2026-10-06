@@ -7,10 +7,27 @@ from typing import Any
 import pytest
 
 from duraflow import (
-    Archived, BroadcastBinding, Conflict, Engine, HandlerRef, MemoryStore,
-    NonDeterminism, Registry, RetryPolicy, SignalRef, SQLiteStore, TaskFailure,
-    TaskOptions, TaskRef, TopicRef, WorkflowBlocked, WorkflowContext, WorkflowFailed,
-    WorkflowRef, task, workflow,
+    Archived,
+    BroadcastBinding,
+    Conflict,
+    Engine,
+    HandlerRef,
+    MemoryStore,
+    NonDeterminism,
+    Registry,
+    RetryPolicy,
+    SignalRef,
+    SQLiteStore,
+    TaskFailure,
+    TaskOptions,
+    TaskRef,
+    TopicRef,
+    WorkflowBlocked,
+    WorkflowContext,
+    WorkflowFailed,
+    WorkflowRef,
+    task,
+    workflow,
 )
 from duraflow.contracts import ProtocolError, canonical, decode, encode, fingerprint, parse_json
 from duraflow.replay import replay
@@ -51,8 +68,9 @@ async def test_sequence_and_completed_replay(tmp_path: Any, backend: str) -> Non
 
 async def test_start_idempotency_and_conflict() -> None:
     async with TestEnvironment(Registry(sequence, double)) as env:
-        a, b = await asyncio.gather(env.client.start(sequence, 3, request_id="same"),
-                                    env.client.start(sequence, 3, request_id="same"))
+        a, b = await asyncio.gather(
+            env.client.start(sequence, 3, request_id="same"), env.client.start(sequence, 3, request_id="same")
+        )
         assert a.run_id == b.run_id
         with pytest.raises(Conflict):
             await env.client.start(sequence, 4, request_id="same")
@@ -241,6 +259,7 @@ async def test_changed_command_and_missing_version_block() -> None:
     @workflow(name="sequence", build_id="test-v1")
     async def changed(ctx: WorkflowContext, value: int) -> int:
         return await ctx.call(DOUBLE, value + 1)
+
     async with TestEnvironment(Registry(sequence)) as env:
         h = await env.client.start(sequence, 2, request_id="change")
         await env.engine.tick()
@@ -255,6 +274,7 @@ async def test_early_return_against_history_blocks() -> None:
     @workflow(name="sequence", build_id="test-v1")
     async def changed(ctx: WorkflowContext, value: int) -> int:
         return 9
+
     async with TestEnvironment(Registry(sequence)) as env:
         h = await env.client.start(sequence, 2, request_id="return")
         await env.engine.tick()
@@ -278,6 +298,7 @@ async def test_unsupported_workflow_constructs(pattern: str) -> None:
                     if pattern != "swallowed-finally":
                         raise
         return value
+
     async with TestEnvironment(Registry(bad, double)) as env:
         h = await env.client.start(bad, 1, request_id="bad")
         await env.drain()
@@ -289,6 +310,7 @@ async def test_workflow_exception_is_failure() -> None:
     @workflow(name="bug", build_id="test")
     async def bug(ctx: WorkflowContext, value: int) -> int:
         return 1 // value
+
     async with TestEnvironment(Registry(bug)) as env:
         h = await env.client.start(bug, 0, request_id="bug")
         await env.drain()
@@ -302,6 +324,7 @@ async def test_now_uuid_recorded_once() -> None:
         ident = await ctx.uuid()
         await ctx.sleep(1)
         return f"{when.isoformat()}/{ident}"
+
     reg = Registry(clocked)
     async with TestEnvironment(reg) as env:
         h = await env.client.start(clocked, 1, request_id="clock")
@@ -316,6 +339,7 @@ async def test_race_records_winner_and_losers_continue() -> None:
     async def racing(ctx: WorkflowContext, value: int) -> int:
         result = await ctx.race(ctx.sleep(10), ctx.call(DOUBLE, value))
         return result.value
+
     async with TestEnvironment(Registry(racing, double)) as env:
         h = await env.client.start(racing, 5, request_id="race")
         assert await env.run(h) == 10
@@ -330,6 +354,7 @@ async def test_child_unique() -> None:
     @workflow(name="parent", build_id="test")
     async def parent(ctx: WorkflowContext, value: int) -> int:
         return await ctx.child(WorkflowRef("sequence", int, int), value)
+
     async with TestEnvironment(Registry(parent, sequence, double)) as env:
         h = await env.client.start(parent, 2, request_id="parent")
         assert await env.run(h) == 9
@@ -342,6 +367,7 @@ async def test_rollover_preserves_pending_signals_and_start_identity() -> None:
         if value == 0:
             await ctx.continue_as_new(1)
         return value if await ctx.wait_signal(APPROVAL) else 0
+
     async with TestEnvironment(Registry(rolling)) as env:
         h = await env.client.start(rolling, 0, request_id="roll", workflow_id="logical")
         await h.signal(APPROVAL, True, signal_id="early")
@@ -387,7 +413,9 @@ async def test_tagged_controls_and_filtered_pagination() -> None:
         assert len(selected) == 3
         page2 = await env.client.list(tags=("chosen",), after=selected[-1]["run_id"], limit=3)
         assert len(page2) == 1
-        result = await env.client.control_tagged("cancel", tags=("chosen",), actor="test", reason="batch", request_id="batch")
+        result = await env.client.control_tagged(
+            "cancel", tags=("chosen",), actor="test", reason="batch", request_id="batch"
+        )
         assert len(result["outcomes"]) == 4
         await env.drain()
         assert all(row["status"] == "CANCELLED" for row in await env.client.list(tags=("chosen",)))

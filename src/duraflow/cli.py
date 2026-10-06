@@ -1,4 +1,5 @@
 """Trusted operator CLI; module imports are explicit configuration, never messages."""
+
 from __future__ import annotations
 
 import argparse
@@ -66,12 +67,26 @@ async def open_store(url: str) -> Store:
     if url.startswith("sqlite:///"):
         return SQLiteStore(url.removeprefix("sqlite:///"))
     from .postgres import PostgresStore
+
     return PostgresStore(url)
 
 
 def summary(state: dict[str, Any]) -> dict[str, Any]:
-    fields = ("namespace", "run_id", "workflow_id", "status", "revision", "manifest", "tags",
-              "created_at", "finished_at", "blocked_reason", "error", "continued_run_id", "archived")
+    fields = (
+        "namespace",
+        "run_id",
+        "workflow_id",
+        "status",
+        "revision",
+        "manifest",
+        "tags",
+        "created_at",
+        "finished_at",
+        "blocked_reason",
+        "error",
+        "continued_run_id",
+        "archived",
+    )
     return {key: state[key] for key in fields}
 
 
@@ -82,11 +97,16 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
     token = os.environ.get("DURAFLOW_PULSAR_TOKEN")
     if token:
         import pulsar
+
         authentication = pulsar.AuthenticationToken(token)
-    transport = PulsarTransport(args.broker, authentication=authentication,
-                                tls_trust_certs_file_path=os.environ.get("DURAFLOW_PULSAR_TLS_CA"))
-    runtime = (Engine(store, transport, registry, namespace=args.namespace) if args.command == "engine" else
-               Worker(store, transport, registry, namespace=args.namespace, broadcasts=getattr(app, "broadcasts", ())))
+    transport = PulsarTransport(
+        args.broker, authentication=authentication, tls_trust_certs_file_path=os.environ.get("DURAFLOW_PULSAR_TLS_CA")
+    )
+    runtime = (
+        Engine(store, transport, registry, namespace=args.namespace)
+        if args.command == "engine"
+        else Worker(store, transport, registry, namespace=args.namespace, broadcasts=getattr(app, "broadcasts", ()))
+    )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -130,7 +150,9 @@ async def execute(args: argparse.Namespace) -> Any:
         if args.command in {"engine", "worker"}:
             return await service(args, store, app, registry)
         if args.command == "list":
-            return [summary(state) for state in await client.list(after=args.after, limit=args.limit, tags=tuple(args.tag))]
+            return [
+                summary(state) for state in await client.list(after=args.after, limit=args.limit, tags=tuple(args.tag))
+            ]
         if args.command == "start":
             definition = registry.resolve(args.workflow)
             value = decode(parse_json(args.input), definition.ref.input_type)
@@ -143,18 +165,24 @@ async def execute(args: argparse.Namespace) -> Any:
         if args.command == "history":
             return await handle.history(after=args.after, limit=args.limit)
         if args.command == "attempts":
-            return {key: node["attempts"] for key, node in (await handle.describe())["nodes"].items() if "attempts" in node}
+            return {
+                key: node["attempts"] for key, node in (await handle.describe())["nodes"].items() if "attempts" in node
+            }
         if args.command == "signal":
             ref = getattr(app, "signals", {}).get(args.channel)
             if ref is None:
                 raise ValueError("Declare the typed channel in your --app signals mapping")
             await handle.signal(ref, decode(parse_json(args.input), ref.payload_type), signal_id=args.signal_id)
         elif args.command == "archive":
-            await handle.archive(actor=args.actor, reason=args.reason, retention=args.retention,
-                                 safety_horizon=args.safety_horizon)
+            await handle.archive(
+                actor=args.actor, reason=args.reason, retention=args.retention, safety_horizon=args.safety_horizon
+            )
         else:
             await handle._control(
-                args.command, actor=args.actor, reason=args.reason, request_id=args.request_id,
+                args.command,
+                actor=args.actor,
+                reason=args.reason,
+                request_id=args.request_id,
                 node_id=args.node_id if args.command == "retry" else None,
             )
         return {"accepted": True, "run_id": handle.run_id}

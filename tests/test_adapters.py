@@ -9,8 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from duraflow import (Client, Conflict, Engine, MemoryTransport, Registry, SQLiteStore, Worker,
-                      WorkflowContext, workflow)
+from duraflow import Client, Conflict, Engine, MemoryTransport, Registry, SQLiteStore, Worker, WorkflowContext, workflow
 from duraflow.cli import execute, parser
 from duraflow.postgres import PostgresStore
 from duraflow.testing import TestEnvironment
@@ -22,7 +21,7 @@ def test_postgres_rejects_wrong_driver_and_unsafe_schema() -> None:
     with pytest.raises(ValueError):
         PostgresStore("sqlite:///file", schema="valid")
     with pytest.raises(ValueError):
-        PostgresStore("postgresql+psycopg://localhost/db", schema='x;DROP TABLE runs')
+        PostgresStore("postgresql+psycopg://localhost/db", schema="x;DROP TABLE runs")
 
 
 async def test_sqlite_concurrent_start_and_atomic_rollover(tmp_path: Any) -> None:
@@ -35,8 +34,9 @@ async def test_sqlite_concurrent_start_and_atomic_rollover(tmp_path: Any) -> Non
     first, second = SQLiteStore(tmp_path / "shared.db"), SQLiteStore(tmp_path / "shared.db")
     reg = Registry(rolling)
     client1, client2 = Client(first, reg), Client(second, reg)
-    h1, h2 = await asyncio.gather(client1.start(rolling, 0, request_id="same"),
-                                  client2.start(rolling, 0, request_id="same"))
+    h1, h2 = await asyncio.gather(
+        client1.start(rolling, 0, request_id="same"), client2.start(rolling, 0, request_id="same")
+    )
     assert h1.run_id == h2.run_id
     engine1, engine2 = Engine(first, MemoryTransport(), reg), Engine(second, MemoryTransport(), reg)
     for _ in range(10):
@@ -53,21 +53,31 @@ async def test_pulsar_provisioning_closes_idle_consumer(monkeypatch: Any) -> Non
     class Consumer:
         def __init__(self, queue: int):
             self.queue, self.closed = queue, False
+
         def close(self) -> None:
             self.closed = True
 
     class NativeClient:
         def __init__(self, *args: Any, **kwargs: Any):
             pass
+
         def subscribe(self, *args: Any, **kwargs: Any) -> Consumer:
             consumer = Consumer(kwargs["receiver_queue_size"])
             subscribers.append(consumer)
             return consumer
+
         def close(self) -> None:
             pass
 
-    monkeypatch.setitem(sys.modules, "pulsar", SimpleNamespace(Client=NativeClient,
-        ConsumerType=SimpleNamespace(Shared="shared"), InitialPosition=SimpleNamespace(Earliest="earliest")))
+    monkeypatch.setitem(
+        sys.modules,
+        "pulsar",
+        SimpleNamespace(
+            Client=NativeClient,
+            ConsumerType=SimpleNamespace(Shared="shared"),
+            InitialPosition=SimpleNamespace(Earliest="earliest"),
+        ),
+    )
     transport = PulsarTransport("pulsar://test")
     await transport.ensure("topic", "handler")
     await transport.ensure("topic", "handler")
@@ -78,8 +88,8 @@ async def test_pulsar_provisioning_closes_idle_consumer(monkeypatch: Any) -> Non
 
 async def test_cli_read_and_explicit_control(tmp_path: Any) -> None:
     database = f"sqlite:///{tmp_path / 'cli.db'}"
-    assert (await execute(parser().parse_args(["--database", database, "init"]))) ["initialized"]
-    assert (await execute(parser().parse_args(["--database", database, "health"]))) ["store_readable"]
+    assert (await execute(parser().parse_args(["--database", database, "init"])))["initialized"]
+    assert (await execute(parser().parse_args(["--database", database, "health"])))["store_readable"]
     assert await execute(parser().parse_args(["--database", database, "list"])) == []
     with pytest.raises(SystemExit):
         parser().parse_args(["terminate", "a-run", "--actor", "a", "--reason", "b", "--request-id", "c"])
@@ -92,8 +102,9 @@ async def test_real_postgres_start_cas_and_replay() -> None:
     store = PostgresStore(os.environ["DURAFLOW_TEST_POSTGRES"])
     await store.initialize()
     async with TestEnvironment(Registry(sequence, double), store=store, namespace=ns) as env:
-        first, second = await asyncio.gather(env.client.start(sequence, 3, request_id="same"),
-                                             env.client.start(sequence, 3, request_id="same"))
+        first, second = await asyncio.gather(
+            env.client.start(sequence, 3, request_id="same"), env.client.start(sequence, 3, request_id="same")
+        )
         assert first.run_id == second.run_id
         with pytest.raises(Conflict):
             await env.client.start(sequence, 4, request_id="same")
@@ -107,8 +118,10 @@ async def test_real_postgres_start_cas_and_replay() -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not (os.getenv("DURAFLOW_TEST_POSTGRES") and os.getenv("DURAFLOW_TEST_PULSAR")),
-                    reason="Native PostgreSQL/Pulsar services not configured")
+@pytest.mark.skipif(
+    not (os.getenv("DURAFLOW_TEST_POSTGRES") and os.getenv("DURAFLOW_TEST_PULSAR")),
+    reason="Native PostgreSQL/Pulsar services not configured",
+)
 async def test_real_broadcast_with_independent_runtime_connections() -> None:
     ns = f"native-{uuid4().hex[:12]}"
     store = PostgresStore(os.environ["DURAFLOW_TEST_POSTGRES"])

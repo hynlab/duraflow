@@ -13,14 +13,25 @@ from typing import Any
 
 import pytest
 
-from duraflow import (Conflict, Deferred, Engine, Registry, RetryPolicy, TaskContext,
-                      TaskOptions, TaskRef, Worker, WorkflowContext, task, workflow)
+from duraflow import (
+    Conflict,
+    Deferred,
+    Engine,
+    Registry,
+    RetryPolicy,
+    TaskContext,
+    TaskOptions,
+    TaskRef,
+    Worker,
+    WorkflowContext,
+    task,
+    workflow,
+)
 from duraflow.contracts import ProtocolError, canonical
 from duraflow.state import route, subscription
 from duraflow.testing import TestEnvironment
 from duraflow.transport import Delivery
-from .test_engine import (A, B, C, DOUBLE, HA, HB, HC, VALUES, a, b, c,
-                          double, sequence, parallel, broadcast, bindings)
+from .test_engine import A, B, C, DOUBLE, HA, HB, HC, VALUES, a, b, c, double, sequence, parallel, broadcast, bindings
 
 
 async def dispatch_first(env: TestEnvironment) -> Delivery:
@@ -70,6 +81,7 @@ async def test_observation_survives_before_ack_crash() -> None:
 async def test_publish_then_mark_lost_republishes_same_identity() -> None:
     class CommitLoss(Exception):
         pass
+
     async with TestEnvironment(Registry(sequence, double)) as env:
         h = await env.client.start(sequence, 1, request_id="outbox-crash")
         await env.engine.advance(h.run_id)
@@ -127,9 +139,13 @@ async def test_conflicting_message_is_quarantined(forgery: str) -> None:
         meta = json.loads(delivery.properties["duraflow"])
         if forgery == "event":
             meta["event_id"] = "not-committed"
-        forged = Delivery(delivery.topic, "wrong" if forgery == "subscription" else delivery.subscription,
-                          b"999" if forgery == "payload" else delivery.data,
-                          {"duraflow": canonical(meta)}, 999)
+        forged = Delivery(
+            delivery.topic,
+            "wrong" if forgery == "subscription" else delivery.subscription,
+            b"999" if forgery == "payload" else delivery.data,
+            {"duraflow": canonical(meta)},
+            999,
+        )
         await env.worker.process(forged, DOUBLE)
         assert env.worker.metrics["quarantined"] == 1
         assert any(m[0].endswith("-dlq") for m in env.transport.publications)
@@ -165,8 +181,9 @@ async def test_only_failed_handler_retries_on_direct_route() -> None:
 
     @workflow(name="broadcast-retry", build_id="test")
     async def flow(ctx: WorkflowContext, value: int) -> int:
-        results = await ctx.broadcast(VALUES, value, handlers=(HA, HB, HC),
-                                      options=TaskOptions(retry=RetryPolicy(max_attempts=2)))
+        results = await ctx.broadcast(
+            VALUES, value, handlers=(HA, HB, HC), options=TaskOptions(retry=RetryPolicy(max_attempts=2))
+        )
         return results[HA] + results[HB] + results[HC]
 
     async with TestEnvironment(Registry(flow, a, flaky, c), broadcasts=bindings()) as env:
@@ -244,6 +261,7 @@ async def test_delegation_token_validation_and_idempotency() -> None:
 
 async def test_external_completion_before_task_returns() -> None:
     async with TestEnvironment(Registry()) as env:
+
         @task(ref=DELEGATED)
         async def external(ctx: TaskContext, value: int) -> Deferred:
             deferred = await ctx.defer(timeout=60)
@@ -284,6 +302,7 @@ async def test_async_cooperative_cancellation() -> None:
 
 async def test_sync_cancellation_waits_for_function_exit() -> None:
     import threading
+
     started, release = threading.Event(), threading.Event()
 
     @task(ref=DOUBLE)
@@ -310,14 +329,24 @@ def test_kill_then_restore_two_of_three_handlers(tmp_path: Path) -> None:
     database, output = tmp_path / "recovery.db", tmp_path / "result.json"
     script = Path(__file__).with_name("recovery_process.py")
     environment = {**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{Path.cwd()}"}
-    first = subprocess.run([sys.executable, str(script), "crash", str(database), str(output)],
-                           env=environment, capture_output=True, text=True, timeout=15)
+    first = subprocess.run(
+        [sys.executable, str(script), "crash", str(database), str(output)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
     assert first.returncode == 23, first.stderr
     restored = tmp_path / "restored.db"
     with closing(sqlite3.connect(database)) as source, closing(sqlite3.connect(restored)) as target:
         source.backup(target)
-    second = subprocess.run([sys.executable, str(script), "resume", str(restored), str(output)],
-                            env=environment, capture_output=True, text=True, timeout=15)
+    second = subprocess.run(
+        [sys.executable, str(script), "resume", str(restored), str(output)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
     assert second.returncode == 0, second.stderr
     result = json.loads(output.read_text())
     assert result == {"status": "COMPLETED", "resumed_task_executions": 1, "final_publications": 1}
@@ -327,7 +356,12 @@ def test_fingerprint_is_independent_of_python_hash_seed() -> None:
     code = "from duraflow.contracts import fingerprint; print(fingerprint({'b':2,'a':1}))"
     values = []
     for seed in ("1", "193", "random"):
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
-                                env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(Path.cwd() / 'src')})
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(Path.cwd() / "src")},
+        )
         values.append(result.stdout)
     assert len(set(values)) == 1

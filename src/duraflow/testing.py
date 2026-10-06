@@ -1,4 +1,5 @@
 """Deterministic local integration harness; not a production broker."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,15 +15,22 @@ from .transport import MemoryTransport
 class TestEnvironment:
     __test__ = False
 
-    def __init__(self, registry: Registry, *, broadcasts: tuple[BroadcastBinding, ...] = (),
-                 store: Store | None = None, namespace: str = "test"):
+    def __init__(
+        self,
+        registry: Registry,
+        *,
+        broadcasts: tuple[BroadcastBinding, ...] = (),
+        store: Store | None = None,
+        namespace: str = "test",
+    ):
         self.clock = ManualClock()
         self.store = store or MemoryStore()
         self.transport = MemoryTransport()
         self.client = Client(self.store, registry, namespace=namespace, clock=self.clock)
         self.engine = Engine(self.store, self.transport, registry, namespace=namespace, clock=self.clock)
-        self.worker = Worker(self.store, self.transport, registry, namespace=namespace,
-                             clock=self.clock, broadcasts=broadcasts)
+        self.worker = Worker(
+            self.store, self.transport, registry, namespace=namespace, clock=self.clock, broadcasts=broadcasts
+        )
         self.namespace = namespace
 
     async def __aenter__(self) -> TestEnvironment:

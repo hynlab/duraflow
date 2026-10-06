@@ -1,4 +1,5 @@
 """Hard-exit fixture: the resume phase cannot see any prior Python objects."""
+
 import asyncio
 import json
 import os
@@ -30,9 +31,15 @@ async def main() -> None:
             env.clock.advance(31)
             await env.drain()
             state = await h.describe()
-            Path(output).write_text(json.dumps({"status": state["status"],
-                "resumed_task_executions": env.worker.metrics["executed"],
-                "final_publications": sum(m[0] == "analyzed" for m in env.transport.publications)}))
+            Path(output).write_text(
+                json.dumps(
+                    {
+                        "status": state["status"],
+                        "resumed_task_executions": env.worker.metrics["executed"],
+                        "final_publications": sum(m[0] == "analyzed" for m in env.transport.publications),
+                    }
+                )
+            )
 
 
 if __name__ == "__main__":

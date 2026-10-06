@@ -1,4 +1,5 @@
 """Bounded task execution with fenced leases and durable automatic reporting."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,9 +12,25 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from .contracts import (Clock, Conflict, MAX_PAYLOAD_BYTES, NotFound, ProtocolError, Registry,
-                        TaskCancelled, TaskFailure, TaskRef, HandlerRef, TopicRef,
-                        decode, duration, encode, fingerprint, name, parse_json)
+from .contracts import (
+    Clock,
+    Conflict,
+    MAX_PAYLOAD_BYTES,
+    NotFound,
+    ProtocolError,
+    Registry,
+    TaskCancelled,
+    TaskFailure,
+    TaskRef,
+    HandlerRef,
+    TopicRef,
+    decode,
+    duration,
+    encode,
+    fingerprint,
+    name,
+    parse_json,
+)
 from .state import event, mutate, route, subscription, wake
 from .storage import State, Store, clone
 from .transport import Delivery, Transport
@@ -82,8 +99,11 @@ class TaskContext:
 
         def change(state: State) -> None:
             current = self._current(state)
-            if (current["lease_until"] <= self.worker.clock.now() or current["observation"] is not None
-                    or state["nodes"][self.node_id].get("cancel_requested")):
+            if (
+                current["lease_until"] <= self.worker.clock.now()
+                or current["observation"] is not None
+                or state["nodes"][self.node_id].get("cancel_requested")
+            ):
                 raise Conflict("Cannot defer an expired, resolved or cancelled invocation")
             current["deferred"] = {"token_hash": token_hash, "expires_at": self.worker.clock.now() + timeout}
             event(state, "task_delegated", self.worker.clock.now(), node_id=self.node_id)
@@ -94,9 +114,18 @@ class TaskContext:
 
 
 class Worker:
-    def __init__(self, store: Store, transport: Transport, registry: Registry, *,
-                 namespace: str = "default", clock: Clock | None = None,
-                 broadcasts: tuple[BroadcastBinding, ...] = (), concurrency: int = 8, lease_seconds: float = 30.0):
+    def __init__(
+        self,
+        store: Store,
+        transport: Transport,
+        registry: Registry,
+        *,
+        namespace: str = "default",
+        clock: Clock | None = None,
+        broadcasts: tuple[BroadcastBinding, ...] = (),
+        concurrency: int = 8,
+        lease_seconds: float = 30.0,
+    ):
         duration(lease_seconds)
         if not 1 <= concurrency <= 256:
             raise ValueError("Worker concurrency must be within 1..256")
@@ -113,13 +142,16 @@ class Worker:
     async def prepare(self) -> None:
         if self.prepared:
             return
-        bindings = [(route(self.namespace, ref.descriptor()), "workers", ref)
-                    for ref, _ in self.registry.tasks.values()]
+        bindings = [
+            (route(self.namespace, ref.descriptor()), "workers", ref) for ref, _ in self.registry.tasks.values()
+        ]
         for binding in self.broadcasts:
             entry = self.registry.tasks.get(binding.handler.task.key)
             if entry is None or entry[0].descriptor() != binding.handler.task.descriptor():
                 raise ProtocolError("Broadcast binding has no compatible registered implementation")
-            bindings.append((binding.topic.name, subscription(self.namespace, binding.handler.subscription), binding.handler.task))
+            bindings.append(
+                (binding.topic.name, subscription(self.namespace, binding.handler.subscription), binding.handler.task)
+            )
         if len({(topic, sub) for topic, sub, _ in bindings}) != len(bindings):
             raise Conflict("Duplicate topic/subscription binding")
         for topic, sub, _ in bindings:
@@ -153,14 +185,22 @@ class Worker:
             if state["archived"]:
                 return None
             node = state["nodes"].get(node_id)
-            if (node is None or node["spec"]["kind"] != "call" or node["spec"]["ref"] != ref.descriptor()
-                    or fingerprint(payload) != fingerprint(node["spec"]["input"])):
+            if (
+                node is None
+                or node["spec"]["kind"] != "call"
+                or node["spec"]["ref"] != ref.descriptor()
+                or fingerprint(payload) != fingerprint(node["spec"]["input"])
+            ):
                 raise ProtocolError("Message identity/input does not match the committed invocation")
             committed = state["outbox"].get(event_id)
             if committed is None or fingerprint([committed["payload"], committed["metadata"]]) != digest:
                 raise ProtocolError("Message does not match its committed dispatch")
-            expected_topic = node.get("initial_topic") if meta["kind"] == "broadcast" else route(self.namespace, ref.descriptor())
-            expected_sub = subscription(self.namespace, node["spec"]["handler"]) if meta["kind"] == "broadcast" else "workers"
+            expected_topic = (
+                node.get("initial_topic") if meta["kind"] == "broadcast" else route(self.namespace, ref.descriptor())
+            )
+            expected_sub = (
+                subscription(self.namespace, node["spec"]["handler"]) if meta["kind"] == "broadcast" else "workers"
+            )
             if delivery.topic != expected_topic or delivery.subscription != expected_sub:
                 raise ProtocolError("Message delivered to the wrong route or participant")
             inbox_key = f"{delivery.subscription}/{event_id}"
@@ -168,11 +208,16 @@ class Worker:
                 raise ProtocolError("Conflicting payload for an existing event identity")
             state["inbox"][inbox_key] = digest
             current = node["attempts"][-1]
-            if (node["state"] != "pending" or node.get("cancel_requested")
-                    or state["status"] in {"CANCELLING", "CANCELLED", "TERMINATED"}
-                    or current["number"] != number or current["not_before"] > now
-                    or current["observation"] is not None or current["deferred"] is not None
-                    or current["lease_until"] > now):
+            if (
+                node["state"] != "pending"
+                or node.get("cancel_requested")
+                or state["status"] in {"CANCELLING", "CANCELLED", "TERMINATED"}
+                or current["number"] != number
+                or current["not_before"] > now
+                or current["observation"] is not None
+                or current["deferred"] is not None
+                or current["lease_until"] > now
+            ):
                 return None
             current["epoch"] += 1
             current["owner"], current["lease_until"] = self.owner, now + self.lease_seconds
@@ -200,8 +245,14 @@ class Worker:
                     raise Conflict("Conflicting observation")
                 return
             current["observation"] = observation
-            event(state, "task_observed", self.clock.now(), node_id=context.node_id,
-                  attempt=context.attempt, epoch=context.lease_epoch)
+            event(
+                state,
+                "task_observed",
+                self.clock.now(),
+                node_id=context.node_id,
+                attempt=context.attempt,
+                epoch=context.lease_epoch,
+            )
             wake(state, f"observation/{context.node_id}/{context.attempt}/{context.lease_epoch}", self.clock.now())
 
         try:
@@ -219,8 +270,14 @@ class Worker:
                 observations = node.setdefault("stale_observations", {})
                 if len(observations) < 100 and key not in observations:
                     observations[key] = fingerprint(observation)
-                    event(state, "stale_observation", self.clock.now(), node_id=context.node_id,
-                          attempt=context.attempt, epoch=context.lease_epoch)
+                    event(
+                        state,
+                        "stale_observation",
+                        self.clock.now(),
+                        node_id=context.node_id,
+                        attempt=context.attempt,
+                        epoch=context.lease_epoch,
+                    )
 
             await mutate(self.store, self.namespace, context.run_id, stale)
 
@@ -294,8 +351,11 @@ class Worker:
                     await self._execute(context, ref)
                 await self.transport.ack(delivery)
             except (ProtocolError, NotFound) as exc:
-                await self.transport.publish(delivery.topic + "-dlq", delivery.data,
-                                             {"reason": type(exc).__name__, "source_subscription": delivery.subscription})
+                await self.transport.publish(
+                    delivery.topic + "-dlq",
+                    delivery.data,
+                    {"reason": type(exc).__name__, "source_subscription": delivery.subscription},
+                )
                 await self.transport.ack(delivery)
                 self.metrics["quarantined"] += 1
             except BaseException:

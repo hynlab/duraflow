@@ -1,4 +1,5 @@
 """Delivery adapters. Broker ACKs are never interpreted as business completion."""
+
 from __future__ import annotations
 
 import asyncio
@@ -80,9 +81,17 @@ class PulsarTransport:
     topics require an explicit schema/codec adapter; no silent schema replacement.
     """
 
-    def __init__(self, url: str, *, receiver_queue_size: int = 64, max_routes: int = 256,
-                 authentication: Any = None, tls_trust_certs_file_path: str | None = None):
+    def __init__(
+        self,
+        url: str,
+        *,
+        receiver_queue_size: int = 64,
+        max_routes: int = 256,
+        authentication: Any = None,
+        tls_trust_certs_file_path: str | None = None,
+    ):
         import pulsar
+
         if receiver_queue_size < 1 or max_routes < 1:
             raise ValueError("Queue size and route limit must be positive")
         options: dict[str, Any] = {"operation_timeout_seconds": 10, "connection_timeout_ms": 5000}
@@ -104,10 +113,13 @@ class PulsarTransport:
                 if len(self.provisioned) >= self.max_routes:
                     raise ValueError("Declared subscription limit exceeded")
                 consumer = await asyncio.to_thread(
-                    self.client.subscribe, topic, subscription,
+                    self.client.subscribe,
+                    topic,
+                    subscription,
                     consumer_type=self.pulsar.ConsumerType.Shared,
                     initial_position=self.pulsar.InitialPosition.Earliest,
-                    receiver_queue_size=1)
+                    receiver_queue_size=1,
+                )
                 # Never retain an idle coordinator consumer: it would prefetch
                 # and steal work. Closing returns any prefetched delivery.
                 await asyncio.to_thread(consumer.close)
@@ -119,8 +131,12 @@ class PulsarTransport:
                 if len(self.producers) >= self.max_routes:
                     raise ValueError("Declared producer limit exceeded")
                 self.producers[topic] = await asyncio.to_thread(
-                    self.client.create_producer, topic, batching_enabled=False,
-                    block_if_queue_full=True, max_pending_messages=64)
+                    self.client.create_producer,
+                    topic,
+                    batching_enabled=False,
+                    block_if_queue_full=True,
+                    max_pending_messages=64,
+                )
         await asyncio.to_thread(self.producers[topic].send, data, properties=properties)
 
     async def receive(self, topic: str, subscription: str, timeout: float = 0.1) -> Delivery | None:
@@ -129,13 +145,15 @@ class PulsarTransport:
             key = topic, subscription
             if key not in self.consumers:
                 self.consumers[key] = await asyncio.to_thread(
-                    self.client.subscribe, topic, subscription,
+                    self.client.subscribe,
+                    topic,
+                    subscription,
                     consumer_type=self.pulsar.ConsumerType.Shared,
                     initial_position=self.pulsar.InitialPosition.Earliest,
-                    receiver_queue_size=self.queue_size)
+                    receiver_queue_size=self.queue_size,
+                )
         try:
-            message = await asyncio.to_thread(
-                self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
+            message = await asyncio.to_thread(self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
         except self.pulsar.Timeout:
             return None
         return Delivery(topic, subscription, message.data(), message.properties(), message)
@@ -144,7 +162,9 @@ class PulsarTransport:
         await asyncio.to_thread(self.consumers[delivery.topic, delivery.subscription].acknowledge, delivery.receipt)
 
     async def nack(self, delivery: Delivery) -> None:
-        await asyncio.to_thread(self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt)
+        await asyncio.to_thread(
+            self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt
+        )
 
     async def close(self) -> None:
         await asyncio.to_thread(self.client.close)
