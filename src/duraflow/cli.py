@@ -14,10 +14,11 @@ from typing import Any
 
 from .client import Client
 from .config import RuntimeSettings
+from .retention import RetentionPolicy
 from .observability import configure_logging
 from .quarantine import decode_quarantine, replay_quarantine, summary as quarantine_summary
 from .supervision import supervise
-from .contracts import DuraflowError, Registry, decode, parse_json
+from .contracts import Registry, decode, parse_json
 from .coordinator import Engine
 from .executor import ProcessReplayExecutor
 from .runner import Worker
@@ -27,7 +28,7 @@ from .transport import PulsarTransport
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="duraflow")
-    root.add_argument("--database", default=os.environ.get("DURAFLOW_DATABASE_URL", "sqlite:///duraflow.db"))
+    root.add_argument("--database", default=None)
     root.add_argument("--namespace", default=os.environ.get("DURAFLOW_NAMESPACE", "default"))
     root.add_argument("--app", help="Trusted module exporting registry, optional broadcasts and signals")
     root.add_argument("--broker", default=os.environ.get("DURAFLOW_PULSAR_URL", "pulsar://localhost:6650"))
@@ -97,6 +98,10 @@ async def open_store(url: str, settings: RuntimeSettings | None = None) -> Store
         operation_timeout=settings.operation_timeout,
         lock_timeout=settings.lock_timeout,
         statement_timeout=settings.statement_timeout,
+        control_role=settings.operator_role if settings.production else None,
+        retention_policy=RetentionPolicy(settings.retention_seconds, settings.redelivery_safety_horizon)
+        if settings.production
+        else None,
     )
 
 
@@ -125,7 +130,7 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
     settings = runtime_settings(args)
     configure_logging()
     authentication = None
-    token = os.environ.get("DURAFLOW_PULSAR_TOKEN")
+    token = settings.pulsar_token
     if token:
         import pulsar
 
@@ -133,7 +138,7 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
     transport = PulsarTransport(
         settings.broker_url,
         authentication=authentication,
-        tls_trust_certs_file_path=os.environ.get("DURAFLOW_PULSAR_TLS_CA"),
+        tls_trust_certs_file_path=settings.pulsar_tls_ca,
         receiver_queue_size=settings.receiver_queue_size,
         max_routes=settings.max_routes,
     )
@@ -221,7 +226,7 @@ async def execute(args: argparse.Namespace) -> Any:
             if not 1 <= args.limit <= 100:
                 raise ValueError("DLQ inspection limit must be 1..100")
             authentication = None
-            token = os.environ.get("DURAFLOW_PULSAR_TOKEN")
+            token = settings.pulsar_token
             if token:
                 import pulsar
 
@@ -229,7 +234,7 @@ async def execute(args: argparse.Namespace) -> Any:
             broker = PulsarTransport(
                 settings.broker_url,
                 authentication=authentication,
-                tls_trust_certs_file_path=os.environ.get("DURAFLOW_PULSAR_TLS_CA"),
+                tls_trust_certs_file_path=settings.pulsar_tls_ca,
             )
             result, seen, receipts = [], set(), []
             try:
@@ -282,8 +287,11 @@ async def execute(args: argparse.Namespace) -> Any:
 def main() -> None:
     try:
         print(json.dumps(asyncio.run(execute(parser().parse_args())), indent=2, ensure_ascii=False))
-    except (DuraflowError, ValueError) as exc:
-        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    except Exception as exc:
+        # Driver exception text can contain URLs, SQL parameters and secrets.
+        print(
+            f"{type(exc).__name__}: command failed; check configuration or authorized run diagnostics", file=sys.stderr
+        )
         raise SystemExit(2) from None
 
 

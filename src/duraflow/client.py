@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from .security import authorize_control
+from .retention import RetentionPolicy
+
 from .contracts import clock_now
 
 import asyncio
@@ -227,20 +230,30 @@ class WorkflowHandle:
                 raise Conflict("Signal mailbox/idempotency quota exceeded")
             if any(s["name"] == ref.name and s["schema"] != descriptor["schema"] for s in state["signals"]):
                 raise Conflict("Signal channel schema is already pinned to another contract")
-            sequence = event(state, "signal_received", self.client.clock.now(), signal_id=signal_id, channel=ref.name)
+            sequence = event(
+                state, "signal_received", clock_now(self.client.clock), signal_id=signal_id, channel=ref.name
+            )
             state["signals"].append({**descriptor, "sequence": sequence, "consumed": False})
             state["signal_keys"][signal_id] = digest
-            wake(state, f"signal/{signal_id}", self.client.clock.now())
+            wake(state, f"signal/{signal_id}", clock_now(self.client.clock))
 
         await mutate(self.client.store, self.client.namespace, self.run_id, change)
 
     async def _control(
-        self, action: str, *, actor: str, reason: str, request_id: str, node_id: str | None = None
+        self,
+        action: str,
+        *,
+        actor: str,
+        reason: str,
+        request_id: str,
+        node_id: str | None = None,
+        _internal: bool = False,
     ) -> None:
         if not actor or not reason or not request_id or len(actor) > 128 or len(reason) > 1000 or len(request_id) > 256:
             raise ValueError("Controls require bounded actor, reason and request_id")
         if action not in {"cancel", "terminate", "resume", "retry"}:
             raise ValueError("Unsupported operator action")
+        principal = await authorize_control(self.client.store, action, internal=_internal)
         digest = fingerprint([action, actor, reason, node_id])
 
         def change(state: State) -> None:
@@ -252,7 +265,7 @@ class WorkflowHandle:
                 raise Conflict("Terminal executions cannot be reopened")
             if len(state["actions"]) >= 1000:
                 raise Conflict("Operator action quota exceeded")
-            now = self.client.clock.now()
+            now = clock_now(self.client.clock)
             if action in {"cancel", "terminate"}:
                 state["status"] = "CANCELLING" if action == "cancel" else "TERMINATED"
                 for node in state["nodes"].values():
@@ -281,8 +294,17 @@ class WorkflowHandle:
                 if not remaining:
                     state["blocked_reason"] = None
             state["actions"][request_id] = digest
-            event(state, "operator_action", now, action=action, actor=actor, reason=reason, node_id=node_id)
-            wake(state, f"control/{request_id}", self.client.clock.now())
+            event(
+                state,
+                "operator_action",
+                now,
+                action=action,
+                actor=actor,
+                reason=reason,
+                node_id=node_id,
+                principal=principal,
+            )
+            wake(state, f"control/{request_id}", clock_now(self.client.clock))
 
         await mutate(self.client.store, self.client.namespace, self.run_id, change)
 
@@ -299,6 +321,11 @@ class WorkflowHandle:
         await self._control("retry", actor=actor, reason=reason, request_id=request_id, node_id=node_id)
 
     async def archive(self, *, actor: str, reason: str, safety_horizon: float, retention: float) -> None:
+        principal = await authorize_control(self.client.store, "archive")
+        policy = getattr(self.client.store, "retention_policy", RetentionPolicy())
+        policy.validate(retention, safety_horizon)
+        if len(actor) > 128 or len(reason) > 1000:
+            raise ValueError("Archive audit fields exceed limits")
         duration(safety_horizon)
         duration(retention)
         if not actor or not reason or retention < safety_horizon:
@@ -310,17 +337,17 @@ class WorkflowHandle:
             if (
                 state["status"] not in TERMINAL
                 or state["finished_at"] is None
-                or self.client.clock.now() - state["finished_at"] < retention
+                or clock_now(self.client.clock) - state["finished_at"] < retention
                 or any(not msg["delivered"] for msg in state["outbox"].values())
                 or any(node["state"] in {"pending", "blocked"} for node in state["nodes"].values())
             ):
                 raise Conflict("Run is not safe to archive")
             state["archived"] = True
-            state["input"], state["result"] = None, None
+            state["input"], state["result"], state["error"], state["blocked_reason"] = None, None, None, None
             for key in ("commands", "history", "signals"):
                 state[key] = []
             for key in ("nodes", "outbox", "inbox"):
                 state[key] = {}
-            event(state, "archived", self.client.clock.now(), actor=actor, reason=reason)
+            event(state, "archived", clock_now(self.client.clock), actor=actor, reason=reason, principal=principal)
 
         await mutate(self.client.store, self.client.namespace, self.run_id, change)

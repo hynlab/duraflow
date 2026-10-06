@@ -1,4 +1,5 @@
 """Trusted deployment security policy; database grants remain the hard boundary."""
+
 from __future__ import annotations
 
 import os
@@ -65,15 +66,26 @@ def validate_production_connections(database_url: str, broker_url: str, token: s
             raise ValueError()
         if params.get("sslmode") != ["verify-full"] or len(params.get("sslrootcert", [])) != 1:
             raise ValueError()
-        if any(len(values) != 1 for values in params.values()) or any(key in params for key in ("service", "host", "hostaddr")):
+        if any(len(values) != 1 for values in params.values()) or any(
+            key in params for key in ("service", "host", "hostaddr")
+        ):
             raise ValueError()
-        if broker.scheme != "pulsar+ssl" or not broker.hostname or broker.username or broker.password or broker.query or broker.fragment:
+        if (
+            broker.scheme != "pulsar+ssl"
+            or not broker.hostname
+            or broker.username
+            or broker.password
+            or broker.query
+            or broker.fragment
+        ):
             raise ValueError()
         if db.fragment or not token or len(token.encode()) > 16384 or any(ord(c) < 32 for c in token):
             raise ValueError()
         _ = db.port, broker.port
     except (TypeError, ValueError):
-        raise ValueError("Production requires verified PostgreSQL TLS, authenticated Pulsar TLS and explicit CA bundles") from None
+        raise ValueError(
+            "Production requires verified PostgreSQL TLS, authenticated Pulsar TLS and explicit CA bundles"
+        ) from None
     validate_ca(params["sslrootcert"][0], "PostgreSQL")
     validate_ca(ca, "Pulsar")
 

@@ -1,4 +1,5 @@
 """Retention policy is configured by the deployment, not by each archive caller."""
+
 from __future__ import annotations
 
 import math
@@ -23,4 +24,4 @@ class RetentionPolicy:
         if retention < self.minimum_retention or safety_horizon < self.redelivery_horizon:
             raise Conflict("Archive request is below deployment retention policy")
         if retention < safety_horizon:
-            raise Conflict("Retention does not cover the requested safety horizon")
+            raise ValueError("Retention does not cover the requested safety horizon")

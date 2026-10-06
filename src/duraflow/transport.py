@@ -96,7 +96,12 @@ class PulsarTransport:
 
         if receiver_queue_size < 1 or max_routes < 1:
             raise ValueError("Queue size and route limit must be positive")
-        options: dict[str, Any] = {"operation_timeout_seconds": 10, "connection_timeout_ms": 5000}
+        options: dict[str, Any] = {
+            "operation_timeout_seconds": 10,
+            "connection_timeout_ms": 5000,
+            "tls_allow_insecure_connection": False,
+            "tls_validate_hostname": True,
+        }
         if authentication is not None:
             options["authentication"] = authentication
         if tls_trust_certs_file_path is not None:
