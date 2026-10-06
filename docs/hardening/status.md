@@ -1,30 +1,28 @@
 # Production hardening status
 
 Published baseline: PyPI `duraflow==0.1.0a1`, source f360e1d.
-These are unreleased source changes; no new PyPI or production deployment.
+The changes below are unreleased source, not a production/PyPI deployment.
 
-| Phase | Status | Executed evidence |
+| Phase | Status | Evidence |
 |---|---|---|
-| 1: execution correctness | Implemented, functional checks passed | Staged CI 37543699908; main CI 37544034956 |
-| 2: storage and due scheduling | Implemented, functional checks passed | Staged CI 37545190528; main CI 37545484522 |
-| 3: operational tooling | Implemented, functional checks passed | Staged CI 37546502779; verified source 77a39c0c4a8b2b7134b68be98c610ff11ba388eb |
-| 4: security and retention | Not complete | None |
+| 1: execution correctness | Implemented; functional validation passed | Staged CI 37543699908; main CI 37544034956 |
+| 2: storage and scheduling | Implemented; functional validation passed | Staged CI 37545190528; main source 2a2e11a |
+| 3: operational tooling | Implemented; functional validation passed | Staged CI 37546502779 and 37546744683; main source 43e7bd2 |
+| 4: security and retention | Implemented; functional validation passed | Staged CI 37548592387; verified source cb44d62749280f1f824c094fc2187bc6cbb0a52a |
 | 5: native failure qualification | Not complete | None |
 | 6: candidate qualification | Not complete | None |
 
-Phase 1: A01-A06; replay isolation, lifecycle acceptance ordering, exact-build
-routing and immutable codec fixtures. Phase 2: B01-B04; rollback-safe migrations,
-row-locked server time, indexed outstanding obligations and bounded infra retry.
-Phase 3: C01-C06; validated settings, process shutdown, read-only probes, safe
-correlation logs, bounded metric labels, and validated handler-specific DLQ replay.
-The phase-3 tests include a genuinely stuck synchronous task in a disposable
-process and SIGTERM/hard-exit verification. Native PostgreSQL/Pulsar checks,
-codec matrices, formatting/lint/types, unit tests and package validation passed.
+Phase 4 ran format/lint/type checks, all non-integration tests, all required
+native PostgreSQL/Pulsar tests including actual restricted PostgreSQL accounts,
+codec matrix, and wheel/sdist metadata validation before promotion. An invalid
+archive request retains its original ValueError contract; deployment-policy
+violations raise Conflict. Existing regression tests were not weakened.
 
-Prometheus alert configuration is supplied; actual alert delivery and production
-notification routing are not asserted. Scope remains trusted internal services.
-Schema v1 -> v2 requires stopping old runtime writers for a maintenance migration.
+TLS policy checks and native SQL role tests do not certify a user's installed
+certificates, broker ACLs or production secret distribution. Runtime writers
+remain trusted: Python policy is not an isolation boundary against direct SQL.
 
-Functional CI is not production approval. The separate coverage gate, complete
-native crash/PITR matrices, measured workload limits, actual 24-hour soak and
-user-environment pilot remain independent gates. See phase1.md–phase3.md.
+Migration from schema v1 to v2 requires stopping old writers; no mixed old/new
+runtime write compatibility is claimed. Exact production release gates remain
+open: complete fault/PITR matrix, measured load limits, real 24-hour soak,
+critical coverage, deployment-specific authorization and a low-risk pilot.

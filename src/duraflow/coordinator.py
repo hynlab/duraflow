@@ -395,8 +395,12 @@ class Engine:
                 else:
                     raise Conflict("Child continuation chain exceeds the reconciliation bound")
                 if child["status"] not in TERMINAL | {"CANCELLING"}:
-                    await self.client.get_handle(child_id).cancel(
-                        actor="parent", reason="Parent closed", request_id=f"parent-close/{run_id}"
+                    await self.client.get_handle(child_id)._control(
+                        "cancel",
+                        _internal=True,
+                        actor="parent",
+                        reason="Parent closed",
+                        request_id=f"parent-close/{run_id}",
                     )
 
                 def confirmed(parent: State) -> None:

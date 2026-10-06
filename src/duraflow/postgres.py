@@ -30,7 +30,17 @@ class PostgresStore:
         operation_timeout: float = 15.0,
         lock_timeout: float = 2.0,
         statement_timeout: float = 5.0,
+        control_role: str | None = None,
+        retention_policy: Any = None,
     ):
+        from .retention import RetentionPolicy
+
+        if control_role is not None:
+            name(control_role)
+            if len(control_role) > 63:
+                raise ValueError("Operator role exceeds PostgreSQL identifier bound")
+        self.control_role = control_role
+        self.retention_policy = retention_policy or RetentionPolicy()
         name(schema)
         if not schema.replace("_", "").isalnum() or not schema.isascii() or len(schema) > 63:
             raise ValueError("Schema must be an ASCII SQL identifier of at most 63 characters")
@@ -457,3 +467,36 @@ class PostgresStore:
                 "due_lag": max(0, now - due) if due is not None else 0,
                 "outbox_age": max(0, now - min(pending)) if pending else 0,
             }
+
+    async def principal(self) -> str:
+        from sqlalchemy import text
+
+        async with self._transaction() as conn:
+            return str((await conn.execute(text("SELECT current_user"))).scalar_one())
+
+    async def authorize_control(self, action: str) -> str:
+        from sqlalchemy import text
+        from .security import AuthorizationError, CONTROLS
+
+        if action not in CONTROLS:
+            raise AuthorizationError("Unknown administrative operation")
+        async with self._transaction() as conn:
+            if self.control_role is None:
+                return str((await conn.execute(text("SELECT current_user"))).scalar_one())
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT current_user AS principal, EXISTS ("
+                            "SELECT 1 FROM pg_roles WHERE rolname = :role AND pg_has_role(current_user, oid, 'USAGE')"
+                            ") AS allowed"
+                        ),
+                        {"role": self.control_role},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if not row["allowed"]:
+                raise AuthorizationError("Database principal lacks the required operator role")
+            return str(row["principal"])
