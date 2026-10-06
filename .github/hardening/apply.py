@@ -15,3 +15,5 @@ if stage == 'phase1':
 if stage == 'phase2':
     tests = Path('tests/test_phase2.py')
     tests.write_text(tests.read_text().replace('mutate, new_run, route', 'mutate, route'))
+if stage == 'phase3':
+    runpy.run_path('.github/hardening/phase3_after.py', run_name='__main__')
