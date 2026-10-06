@@ -1,4 +1,5 @@
 """Disposable application with an independent, idempotent external effect ledger."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,10 +26,12 @@ def ledger_path() -> Path:
 
 def initialize_ledger(path: Path) -> None:
     with sqlite3.connect(path, timeout=10) as conn:
-        conn.executescript("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls "
-                           "(id INTEGER PRIMARY KEY, task_key TEXT NOT NULL, handler INTEGER NOT NULL); "
-                           "CREATE TABLE IF NOT EXISTS effects "
-                           "(task_key TEXT PRIMARY KEY, handler INTEGER NOT NULL, result INTEGER NOT NULL);")
+        conn.executescript(
+            "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls "
+            "(id INTEGER PRIMARY KEY, task_key TEXT NOT NULL, handler INTEGER NOT NULL); "
+            "CREATE TABLE IF NOT EXISTS effects "
+            "(task_key TEXT PRIMARY KEY, handler INTEGER NOT NULL, result INTEGER NOT NULL);"
+        )
 
 
 async def checkpoint(point: str, handler: int) -> None:
@@ -47,13 +50,20 @@ async def effect(ctx: TaskContext, value: int, handler: int) -> int:
     def entered() -> None:
         with sqlite3.connect(ledger_path(), timeout=10) as conn:
             conn.execute("INSERT INTO calls(task_key, handler) VALUES (?, ?)", (ctx.idempotency_key, handler))
+
     await asyncio.to_thread(entered)
     await checkpoint("before_effect", handler)
+
     def commit() -> int:
         with sqlite3.connect(ledger_path(), timeout=10) as conn:
-            conn.execute("INSERT OR IGNORE INTO effects(task_key,handler,result) VALUES (?,?,?)",
-                         (ctx.idempotency_key, handler, value + handler))
-            return int(conn.execute("SELECT result FROM effects WHERE task_key=?", (ctx.idempotency_key,)).fetchone()[0])
+            conn.execute(
+                "INSERT OR IGNORE INTO effects(task_key,handler,result) VALUES (?,?,?)",
+                (ctx.idempotency_key, handler, value + handler),
+            )
+            return int(
+                conn.execute("SELECT result FROM effects WHERE task_key=?", (ctx.idempotency_key,)).fetchone()[0]
+            )
+
     result = await asyncio.to_thread(commit)
     await checkpoint("after_effect", handler)
     return result

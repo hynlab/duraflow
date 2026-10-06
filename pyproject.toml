@@ -31,7 +31,7 @@ duraflow = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["integration: requires native PostgreSQL and/or Pulsar services"]
+markers = ["fault: destructive tests on explicitly opted-in isolated Compose services", "integration: requires native PostgreSQL and/or Pulsar services"]
 
 [tool.ruff]
 line-length = 120
