@@ -1,1 +1,1 @@
-{"stage":"phase1","revision":2,"message":"feat: isolate replay and version lifecycle ordering (A02-A06)"}
+{"stage":"phase2","message":"feat: add transactional migrations and indexed authoritative-time scheduling (B01-B04)"}
