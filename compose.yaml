@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: duraflow
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: duraflow
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U duraflow -d duraflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  pulsar:
+    image: apachepulsar/pulsar:4.0.3
+    command: ["bin/pulsar", "standalone", "--no-functions-worker", "--no-stream-storage"]
+    environment:
+      PULSAR_MEM: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m"
+    ports: ["127.0.0.1:6650:6650", "127.0.0.1:8080:8080"]
+    volumes: ["pulsar-data:/pulsar/data"]
+    healthcheck:
+      test: ["CMD", "bin/pulsar-admin", "brokers", "healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+volumes:
+  postgres-data:
+  pulsar-data:
