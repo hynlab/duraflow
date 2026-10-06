@@ -1,18 +1,18 @@
-name: Staged hardening verification
+name: Security and qualification verification
 on:
   push:
-    branches: [hardening/staged]
+    branches: [hardening/security-retention]
     paths: ['.github/hardening/**', '.github/workflows/hardening.yml']
 permissions:
   contents: write
 concurrency:
-  group: staged-hardening
+  group: security-retention-hardening
   cancel-in-progress: false
 jobs:
   verify-stage:
     if: github.repository == 'hynlab/duraflow'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,37 +20,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install validation dependencies
-        run: python -m pip install -e '.[dev,postgres,pulsar]' 'twine>=6.1,<8'
-      - name: Apply the reviewed stage changes
+      - run: python -m pip install -e '.[dev,postgres,pulsar]' 'twine>=6.1,<8'
+      - name: Apply reviewed stage changes
         run: python .github/hardening/apply.py
-      - name: Format changed Python and run shared checks
+      - name: Shared quality and regression checks
         run: |
           ruff format src tests examples scripts
           make check
-      - name: Start isolated native test services
-        run: docker compose up -d --wait --wait-timeout 240
+      - run: docker compose up -d --wait --wait-timeout 240
       - name: Required native tests
         env:
           DURAFLOW_TEST_POSTGRES: postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow
           DURAFLOW_TEST_PULSAR: pulsar://localhost:6650
         run: make native-check
-      - name: Build and validate distributions
-        run: python -m build && python -m twine check --strict dist/*
-      - name: Commit only after all stage checks pass
+      - run: python -m build && python -m twine check --strict dist/*
+      - name: Commit only the verified stage
         env:
           STAGE_INPUT_SHA: ${{ github.sha }}
         run: |
-          test "$(git ls-remote origin refs/heads/hardening/staged | cut -f1)" = "$STAGE_INPUT_SHA"
+          test "$(git ls-remote origin refs/heads/hardening/security-retention | cut -f1)" = "$STAGE_INPUT_SHA"
           git config user.name 'Duraflow automation'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src tests examples scripts docs Makefile pyproject.toml .github/workflows/ci.yml .github/workflows/publish.yml
+          git add src tests examples scripts docs Makefile pyproject.toml
           if ! git diff --cached --quiet; then
             git commit -m "$(python -c 'import json; print(json.load(open(".github/hardening/request.json"))["message"])')"
-            git push origin HEAD:refs/heads/hardening/staged
+            git push origin HEAD:refs/heads/hardening/security-retention
           fi
           echo "Verified source commit: $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Collect diagnostics
+      - name: Diagnostics
         if: failure()
         run: docker compose logs --tail=100 || true
       - uses: actions/upload-artifact@v4
@@ -63,6 +60,5 @@ jobs:
             test-results.xml
             native-results.xml
           if-no-files-found: ignore
-      - name: Stop test infrastructure
-        if: always()
+      - if: always()
         run: docker compose down -v
