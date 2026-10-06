@@ -36,6 +36,7 @@ from .contracts import (
 from .state import event, mutate, route, subscription, wake
 from .storage import State, Store, clone
 from .transport import Delivery, Transport
+from .quarantine import quarantine
 from .lifecycle import record_observation
 
 log = logging.getLogger("duraflow.worker")
@@ -140,6 +141,7 @@ class Worker:
         self.bindings: list[tuple[str, str, TaskRef[Any, Any]]] = []
         self.semaphore = asyncio.Semaphore(concurrency)
         self.prepared, self.cursor = False, 0
+        self.accepting, self.draining = True, False
         self.metrics = {"executed": 0, "duplicates": 0, "stale_results": 0, "quarantined": 0}
 
     async def prepare(self) -> None:
@@ -237,6 +239,10 @@ class Worker:
             self.metrics["duplicates"] += 1
             return None
         epoch, task_id = claimed
+        log.info(
+            "task_claimed",
+            extra={"run_id": run_id, "node_id": node_id, "task_id": task_id, "attempt": number, "epoch": epoch},
+        )
         return TaskContext(self, run_id, node_id, number, epoch, task_id)
 
     async def _observe(self, context: TaskContext, result: Any, error: dict[str, Any] | None) -> None:
@@ -252,6 +258,16 @@ class Worker:
 
         try:
             await mutate(self.store, self.namespace, context.run_id, change)
+            log.info(
+                "task_observed",
+                extra={
+                    "run_id": context.run_id,
+                    "node_id": context.node_id,
+                    "task_id": context.task_id,
+                    "attempt": context.attempt,
+                    "epoch": context.lease_epoch,
+                },
+            )
         except Conflict:
             self.metrics["stale_results"] += 1
 
@@ -340,6 +356,9 @@ class Worker:
 
     async def process(self, delivery: Delivery, ref: TaskRef[Any, Any]) -> None:
         async with self.semaphore:
+            if self.draining or not self.accepting:
+                await self.transport.nack(delivery)
+                return
             try:
                 context = await self._claim(delivery, ref)
                 if context is not None:
@@ -348,16 +367,19 @@ class Worker:
             except (ProtocolError, NotFound) as exc:
                 await self.transport.publish(
                     delivery.topic + "-dlq",
-                    delivery.data,
+                    quarantine(delivery, type(exc).__name__),
                     {"reason": type(exc).__name__, "source_subscription": delivery.subscription},
                 )
                 await self.transport.ack(delivery)
                 self.metrics["quarantined"] += 1
+                log.warning("message_quarantined", extra={"error_type": type(exc).__name__})
             except BaseException:
                 await self.transport.nack(delivery)
                 raise
 
     async def step(self) -> bool:
+        if self.draining or not self.accepting:
+            return False
         await self.prepare()
         for _ in range(len(self.bindings)):
             topic, sub, ref = self.bindings[self.cursor % len(self.bindings)]
@@ -377,7 +399,7 @@ class Worker:
                     if not await self.step():
                         await asyncio.sleep(poll_interval)
                 except Exception as exc:
-                    log.error("Worker iteration failed", extra={"error_type": type(exc).__name__})
+                    log.error("worker_iteration_failed", extra={"error_type": type(exc).__name__})
                     await asyncio.sleep(poll_interval)
 
         async with asyncio.TaskGroup() as group:

@@ -146,6 +146,7 @@ class Engine:
         self.reconcile_interval, self.cursor = reconcile_interval, ""
         self.replay_executor = replay_executor or InlineReplayExecutor()
         self.client = Client(store, registry, namespace=namespace, clock=self.clock)
+        self.accepting, self.draining = True, False
         self.metrics = {
             "activations": 0,
             "cas_conflicts": 0,
@@ -510,9 +511,10 @@ class Engine:
         duration(poll_interval)
         while not stop.is_set():
             try:
-                await self.tick()
+                if self.accepting and not self.draining:
+                    await self.tick()
             except Exception as exc:
-                log.error("Engine iteration failed", extra={"error_type": type(exc).__name__})
+                log.error("engine_iteration_failed", extra={"error_type": type(exc).__name__})
             try:
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
             except TimeoutError:

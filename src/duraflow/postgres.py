@@ -413,3 +413,47 @@ class PostgresStore:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    async def telemetry(self, namespace: str) -> dict[str, Any]:
+        """Metadata counts plus a bounded 100-active-run outbox-age sample."""
+        from sqlalchemy import func, select
+
+        async with self._transaction() as conn:
+            now = await self._now(conn)
+            counts = (
+                await conn.execute(
+                    select(self.runs.c.status, func.count())
+                    .where(self.runs.c.namespace == namespace)
+                    .group_by(self.runs.c.status)
+                )
+            ).all()
+            due = (
+                await conn.execute(
+                    select(func.min(self.runs.c.next_due)).where(
+                        self.runs.c.namespace == namespace, self.runs.c.next_due > 0, self.runs.c.next_due <= now
+                    )
+                )
+            ).scalar()
+            documents = (
+                (
+                    await conn.execute(
+                        select(self.runs.c.document)
+                        .where(self.runs.c.namespace == namespace, self.runs.c.next_due.is_not(None))
+                        .order_by(self.runs.c.next_due)
+                        .limit(100)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            pending = [
+                item["created_at"]
+                for document in documents
+                for item in document["outbox"].values()
+                if not item["delivered"]
+            ]
+            return {
+                "statuses": {row[0]: row[1] for row in counts},
+                "due_lag": max(0, now - due) if due is not None else 0,
+                "outbox_age": max(0, now - min(pending)) if pending else 0,
+            }

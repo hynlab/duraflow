@@ -190,3 +190,7 @@ class PulsarTransport:
 
         future.add_done_callback(released)
         return await asyncio.shield(future)
+
+    async def ping(self) -> bool:
+        topic = next(iter(self.provisioned))[0] if self.provisioned else "persistent://public/default/df-health"
+        return bool(await self._native(self.client.get_topic_partitions, topic))
