@@ -1,0 +1,203 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version from pyproject.toml to publish
+        required: true
+        type: string
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths: [.github/pypi-release.txt]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'hynlab/duraflow' && (github.event_name == 'release' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate explicit release request
+        id: metadata
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          version = project['version']
+          event = os.environ['GITHUB_EVENT_NAME']
+          if event == 'workflow_dispatch':
+              requested = os.environ['REQUESTED_VERSION']
+          elif event == 'release':
+              requested = os.environ['GITHUB_REF_NAME'].removeprefix('v')
+          else:
+              requested = Path('.github/pypi-release.txt').read_text().strip()
+          if project['name'] != 'duraflow' or requested != version:
+              raise SystemExit('Release request must match duraflow and its exact package version')
+          if project['license'] != 'Apache-2.0':
+              raise SystemExit('Unexpected package license')
+          print(f'Preparing duraflow=={version}; this does not imply publication')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+      - name: Install build and test dependencies
+        run: python -m pip install -e '.[dev,postgres,pulsar]' 'twine>=6.1,<8'
+      - name: Lint and type-check
+        run: make lint && make typecheck
+      - name: Start isolated test services
+        run: docker compose up -d --wait --wait-timeout 240
+      - name: Run unit, recovery and native integration tests
+        env:
+          DURAFLOW_TEST_POSTGRES: postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow
+          DURAFLOW_TEST_PULSAR: pulsar://localhost:6650
+        run: |
+          PYTHONPATH=src:. pytest -v
+          python examples/quickstart.py
+          python examples/broadcast_join.py
+      - name: Capture test-service diagnostics on failure
+        if: failure()
+        run: docker compose logs --tail=100
+      - name: Stop isolated test services
+        if: always()
+        run: docker compose down -v
+      - name: Build and validate distributions
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          python -m build
+          python -m twine check --strict dist/*
+          python - <<'PY'
+          import email
+          import hashlib
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+          files = sorted(Path('dist').iterdir())
+          wheels = [p for p in files if p.suffix == '.whl']
+          sdists = [p for p in files if p.name.endswith('.tar.gz')]
+          assert len(files) == 2 and len(wheels) == len(sdists) == 1
+          with zipfile.ZipFile(wheels[0]) as archive:
+              assert 'duraflow/py.typed' in archive.namelist()
+              assert any(n.endswith('/licenses/LICENSE') for n in archive.namelist())
+              path = next(n for n in archive.namelist() if n.endswith('/METADATA'))
+              metadata = email.message_from_bytes(archive.read(path))
+              assert metadata['Name'] == 'duraflow'
+              assert metadata['Version'] == os.environ['RELEASE_VERSION']
+              assert metadata['License-Expression'] == 'Apache-2.0'
+              assert metadata['Requires-Python'] == '>=3.12'
+          with tarfile.open(sdists[0]) as archive:
+              assert any(n.endswith('/LICENSE') for n in archive.getnames())
+              assert any(n.endswith('/src/duraflow/py.typed') for n in archive.getnames())
+          for path in files:
+              print(hashlib.sha256(path.read_bytes()).hexdigest(), path.name)
+          PY
+      - name: Smoke-test installed wheel outside the source tree
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          python -m venv "$RUNNER_TEMP/duraflow-wheel-smoke"
+          "$RUNNER_TEMP/duraflow-wheel-smoke/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/duraflow-wheel-smoke/bin/python" -I -c 'import os, duraflow; from importlib.metadata import version; assert version("duraflow") == os.environ["RELEASE_VERSION"]'
+          "$RUNNER_TEMP/duraflow-wheel-smoke/bin/duraflow" --help
+      - name: Store the exact distributions to publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/duraflow/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-distributions
+          path: dist/
+      - name: Publish using PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true
+          skip-existing: false
+          verbose: false
+
+  verify:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-distributions
+          path: dist/
+      - name: Verify PyPI files against the built artifact
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+          version = os.environ['RELEASE_VERSION']
+          url = f'https://pypi.org/pypi/duraflow/{urllib.parse.quote(version, safe="")}/json'
+          expected = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('dist').iterdir()}
+          for attempt in range(12):
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      data = json.load(response)
+                  actual = {p['filename']: p['digests']['sha256'] for p in data['urls']}
+                  if expected and all(actual.get(name) == digest for name, digest in expected.items()):
+                      print(f'Verified duraflow=={version}: published files match this workflow')
+                      with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+                          output.write(f'Published and hash-verified `duraflow=={version}` on PyPI.\n')
+                      break
+              except (urllib.error.URLError, TimeoutError) as error:
+                  print(f'PyPI verification pending: {type(error).__name__}')
+              time.sleep(5)
+          else:
+              raise SystemExit('PyPI does not yet serve the exact expected distribution hashes')
+          PY
+      - name: Install the published package from PyPI
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple "duraflow==$RELEASE_VERSION"
+          python -I -c 'import os, duraflow; from importlib.metadata import version; assert version("duraflow") == os.environ["RELEASE_VERSION"]'
+          duraflow --help
