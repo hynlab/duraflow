@@ -112,6 +112,9 @@ def new_run(
 
 
 async def mutate(store: Store, namespace: str, run_id: str, change: Callable[[State], Any]) -> Any:
+    atomic = getattr(store, "mutate_atomic", None)
+    if atomic is not None:
+        return await atomic(namespace, run_id, change)
     for _ in range(64):
         state = await store.load(namespace, run_id)
         before = fingerprint(state)

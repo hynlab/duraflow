@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .contracts import clock_now
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -265,6 +267,7 @@ class Engine:
         except Conflict as exc:
             raise WorkflowBlocked("Child identity or pinned implementation conflict") from exc
         result = await child.describe()
+        node["child_started"] = True
         for _ in range(100):
             if result["status"] != "CONTINUED":
                 break
@@ -303,7 +306,10 @@ class Engine:
         if state["status"] not in TERMINAL | {"CANCELLING"} and self.registry.match_manifest(state["manifest"]) is None:
             self.metrics["unsupported_activations"] += 1
             return
-        original, now = fingerprint(state), self.clock.now()
+        original = fingerprint(state)
+        native_now = getattr(self.store, "now", None)
+        now = await native_now() if native_now is not None else clock_now(self.clock)
+        state.setdefault("reconcile_interval", self.reconcile_interval)
         try:
             for node in state["nodes"].values():
                 if node["state"] != "pending":
@@ -375,7 +381,7 @@ class Engine:
         if state["status"] not in TERMINAL | {"CANCELLING"}:
             return
         for node in state["nodes"].values():
-            if node["spec"]["kind"] != "child" or node["spec"].get("abandon"):
+            if node["spec"]["kind"] != "child" or node["spec"].get("abandon") or node.get("child_close_confirmed"):
                 continue
             try:
                 child_id = node["child_run_id"]
@@ -385,18 +391,29 @@ class Engine:
                         break
                     child_id = child["continued_run_id"]
                     child = await self.store.load(self.namespace, child_id)
+                else:
+                    raise Conflict("Child continuation chain exceeds the reconciliation bound")
                 if child["status"] not in TERMINAL | {"CANCELLING"}:
                     await self.client.get_handle(child_id).cancel(
                         actor="parent", reason="Parent closed", request_id=f"parent-close/{run_id}"
                     )
+
+                def confirmed(parent: State) -> None:
+                    current = parent["nodes"].get(node["id"])
+                    if current is not None:
+                        current["child_close_confirmed"] = True
+
+                await mutate(self.store, self.namespace, run_id, confirmed)
             except (Conflict, NotFound):
+                # Missing is not evidence that a concurrent child-start cannot commit.
                 pass
 
     async def flush(self, run_id: str, limit: int = 32) -> None:
         for _ in range(limit):
-            owner, now = str(uuid4()), self.clock.now()
+            owner = str(uuid4())
 
             def claim(state: State) -> Any:
+                now = clock_now(self.clock)
                 for event_id, item in state["outbox"].items():
                     if item["delivered"] or item["lease_until"] > now:
                         continue
@@ -406,6 +423,8 @@ class Engine:
                         "TERMINATED",
                     }:
                         item["delivered"], item["suppressed"] = True, True
+                        continue
+                    if item.get("next_attempt_at", 0) > now:
                         continue
                     item["owner"], item["lease_until"] = owner, now + 30
                     item["attempts"] += 1
@@ -417,16 +436,24 @@ class Engine:
                 return
             event_id, item = claimed
             try:
-                await self.transport.publish(
-                    item["topic"], canonical(item["payload"]).encode(), {"duraflow": canonical(item["metadata"])}
+                await asyncio.wait_for(
+                    self.transport.publish(
+                        item["topic"], canonical(item["payload"]).encode(), {"duraflow": canonical(item["metadata"])}
+                    ),
+                    timeout=10,
                 )
-            except Exception:
+            except Exception as exc:
                 self.metrics["transport_errors"] += 1
+                error_type = type(exc).__name__
 
                 def release(state: State) -> None:
                     current = state["outbox"].get(event_id)
                     if current and current["owner"] == owner:
                         current["lease_until"], current["owner"] = 0, None
+                        current["next_attempt_at"] = clock_now(self.clock) + min(
+                            60, 2 ** min(current["attempts"] - 1, 6)
+                        )
+                        current["last_error_type"] = error_type
 
                 await mutate(self.store, self.namespace, run_id, release)
                 raise
@@ -435,23 +462,46 @@ class Engine:
                 current = state["outbox"].get(event_id)
                 if current and current["owner"] == owner:
                     current["delivered"], current["lease_until"] = True, 0
+                    current["next_attempt_at"] = 0
 
             await mutate(self.store, self.namespace, run_id, delivered)
             self.metrics["publications"] += 1
 
     async def tick(self) -> int:
-        rows = await self.store.scan(self.namespace, self.cursor, self.batch_size)
+        due = getattr(self.store, "scan_due", None)
+
+        async def page(after: str) -> list[State]:
+            if due is not None:
+                return await due(
+                    self.namespace,
+                    after,
+                    self.batch_size,
+                    manifests=tuple(d.manifest for d in self.registry.workflows.values()),
+                )
+            return await self.store.scan(self.namespace, after, self.batch_size)
+
+        rows = await page(self.cursor)
         if not rows and self.cursor:
             self.cursor = ""
-            rows = await self.store.scan(self.namespace, "", self.batch_size)
+            rows = await page("")
         self.cursor = rows[-1]["run_id"] if len(rows) == self.batch_size else ""
+        semaphore = asyncio.Semaphore(4)
         failures = []
-        for state in rows:
-            try:
-                await self.advance(state["run_id"])
-                await self.flush(state["run_id"])
-            except Exception as exc:
-                failures.append(exc)
+
+        async def process(state: State) -> None:
+            async with semaphore:
+                try:
+                    # A stuck route cannot hold the entire polling batch indefinitely.
+                    async with asyncio.timeout(30):
+                        await self.advance(state["run_id"])
+                        await self.flush(state["run_id"])
+                        refresh = getattr(self.store, "refresh_projection", None)
+                        if refresh is not None:
+                            await refresh(self.namespace, state["run_id"])
+                except Exception as exc:
+                    failures.append(exc)
+
+        await asyncio.gather(*(process(state) for state in rows))
         if failures:
             raise failures[0]
         return len(rows)

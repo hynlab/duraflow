@@ -27,7 +27,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--app", help="Trusted module exporting registry, optional broadcasts and signals")
     root.add_argument("--broker", default=os.environ.get("DURAFLOW_PULSAR_URL", "pulsar://localhost:6650"))
     commands = root.add_subparsers(dest="command", required=True)
-    for command in ("init", "health", "engine", "worker"):
+    for command in ("init", "migrate", "health", "engine", "worker"):
         commands.add_parser(command)
     listing = commands.add_parser("list")
     listing.add_argument("--after", default="")
@@ -141,11 +141,12 @@ async def execute(args: argparse.Namespace) -> Any:
     store = await open_store(args.database)
     client = Client(store, registry, namespace=args.namespace)
     try:
-        if args.command == "init":
+        if args.command in {"init", "migrate"}:
             initialize = getattr(store, "initialize", None)
             if initialize is not None:
                 await initialize()
-            return {"schema_version": 1, "initialized": True}
+            version = getattr(store, "schema_version", None)
+            return {"schema_version": await version() if version is not None else 1, "initialized": True}
         if args.command == "health":
             await store.scan(args.namespace, limit=1)
             return {"store_readable": True, "namespace": args.namespace}

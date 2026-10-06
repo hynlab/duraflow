@@ -1,4 +1,5 @@
 """Pure, conservative projection of a run's next outstanding obligation."""
+
 from __future__ import annotations
 
 from .contracts import TERMINAL
@@ -29,8 +30,12 @@ def next_due(state: State, now: float, *, reconcile_interval: float = 10.0) -> f
                 times.append(0.0)
     for node in state["nodes"].values():
         kind = node["spec"]["kind"]
-        if (kind == "child" and state["status"] in TERMINAL | {"CANCELLING"}
-                and not node["spec"].get("abandon") and not node.get("child_close_confirmed")):
+        if (
+            kind == "child"
+            and state["status"] in TERMINAL | {"CANCELLING"}
+            and not node["spec"].get("abandon")
+            and not node.get("child_close_confirmed")
+        ):
             # Absence is not proof that a concurrent child-start cannot commit.
             times.append(now + 1.0)
         if node["state"] != "pending":

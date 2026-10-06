@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .contracts import clock_now
+
 import asyncio
 import hashlib
 import hmac
@@ -58,7 +60,9 @@ class Client:
         definition = self.registry.resolve(workflow)
         value = encode(value, definition.ref.input_type)
         digest = fingerprint([definition.manifest, workflow_id, value, sorted(set(tags))])
-        state = new_run(definition, self.namespace, _run_id or str(uuid4()), workflow_id, value, self.clock.now(), tags)
+        state = new_run(
+            definition, self.namespace, _run_id or str(uuid4()), workflow_id, value, clock_now(self.clock), tags
+        )
         saved = await self.store.create(state, request_id, digest)
         return WorkflowHandle(self, saved["run_id"], definition.ref.output_type)
 
@@ -147,7 +151,7 @@ class Client:
                 or not hmac.compare_digest(deferred["token_hash"], digest)
             ):
                 raise Conflict("Completion token is invalid or superseded")
-            now = self.clock.now()
+            now = clock_now(self.clock)
             if current["observation"] is not None:
                 return record_observation(state, node, observation, now, kind="external_observation")
             if (

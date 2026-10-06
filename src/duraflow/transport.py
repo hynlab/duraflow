@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -105,6 +107,8 @@ class PulsarTransport:
         self.producers: dict[str, Any] = {}
         self.provisioned: set[tuple[str, str]] = set()
         self.lock = asyncio.Lock()
+        self.native_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="duraflow-pulsar")
+        self.native_slots = asyncio.Semaphore(8)
 
     async def ensure(self, topic: str, subscription: str) -> None:
         async with self.lock:
@@ -112,7 +116,7 @@ class PulsarTransport:
             if key not in self.provisioned:
                 if len(self.provisioned) >= self.max_routes:
                     raise ValueError("Declared subscription limit exceeded")
-                consumer = await asyncio.to_thread(
+                consumer = await self._native(
                     self.client.subscribe,
                     topic,
                     subscription,
@@ -122,7 +126,7 @@ class PulsarTransport:
                 )
                 # Never retain an idle coordinator consumer: it would prefetch
                 # and steal work. Closing returns any prefetched delivery.
-                await asyncio.to_thread(consumer.close)
+                await self._native(consumer.close)
                 self.provisioned.add(key)
 
     async def publish(self, topic: str, data: bytes, properties: dict[str, str]) -> None:
@@ -130,21 +134,22 @@ class PulsarTransport:
             if topic not in self.producers:
                 if len(self.producers) >= self.max_routes:
                     raise ValueError("Declared producer limit exceeded")
-                self.producers[topic] = await asyncio.to_thread(
+                self.producers[topic] = await self._native(
                     self.client.create_producer,
                     topic,
                     batching_enabled=False,
                     block_if_queue_full=True,
                     max_pending_messages=64,
+                    send_timeout_millis=5000,
                 )
-        await asyncio.to_thread(self.producers[topic].send, data, properties=properties)
+        await self._native(self.producers[topic].send, data, properties=properties)
 
     async def receive(self, topic: str, subscription: str, timeout: float = 0.1) -> Delivery | None:
         await self.ensure(topic, subscription)
         async with self.lock:
             key = topic, subscription
             if key not in self.consumers:
-                self.consumers[key] = await asyncio.to_thread(
+                self.consumers[key] = await self._native(
                     self.client.subscribe,
                     topic,
                     subscription,
@@ -153,18 +158,35 @@ class PulsarTransport:
                     receiver_queue_size=self.queue_size,
                 )
         try:
-            message = await asyncio.to_thread(self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
+            message = await self._native(self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
         except self.pulsar.Timeout:
             return None
         return Delivery(topic, subscription, message.data(), message.properties(), message)
 
     async def ack(self, delivery: Delivery) -> None:
-        await asyncio.to_thread(self.consumers[delivery.topic, delivery.subscription].acknowledge, delivery.receipt)
+        await self._native(self.consumers[delivery.topic, delivery.subscription].acknowledge, delivery.receipt)
 
     async def nack(self, delivery: Delivery) -> None:
-        await asyncio.to_thread(
-            self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt
-        )
+        await self._native(self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt)
 
     async def close(self) -> None:
-        await asyncio.to_thread(self.client.close)
+        try:
+            await self._native(self.client.close)
+        finally:
+            self.native_pool.shutdown(wait=False, cancel_futures=True)
+
+    async def _native(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        await self.native_slots.acquire()
+        try:
+            future = asyncio.get_running_loop().run_in_executor(self.native_pool, partial(fn, *args, **kwargs))
+        except BaseException:
+            self.native_slots.release()
+            raise
+
+        def released(done: Any) -> None:
+            self.native_slots.release()
+            if not done.cancelled():
+                done.exception()
+
+        future.add_done_callback(released)
+        return await asyncio.shield(future)
