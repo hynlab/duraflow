@@ -153,12 +153,10 @@ async def execute(args: argparse.Namespace) -> Any:
             await handle.archive(actor=args.actor, reason=args.reason, retention=args.retention,
                                  safety_horizon=args.safety_horizon)
         else:
-            action = {"cancel": handle.cancel, "terminate": handle.terminate,
-                      "resume": handle.resume_blocked, "retry": handle.retry_blocked_task}[args.command]
-            kwargs = {"actor": args.actor, "reason": args.reason, "request_id": args.request_id}
-            if args.command == "retry":
-                kwargs["node_id"] = args.node_id
-            await action(**kwargs)
+            await handle._control(
+                args.command, actor=args.actor, reason=args.reason, request_id=args.request_id,
+                node_id=args.node_id if args.command == "retry" else None,
+            )
         return {"accepted": True, "run_id": handle.run_id}
     finally:
         await store.close()
