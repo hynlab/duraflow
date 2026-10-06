@@ -63,15 +63,17 @@ class JsonLogFormatter(logging.Formatter):
             event = "runtime_message"
         data: dict[str, Any] = {"time": record.created, "level": record.levelname, "event": event}
         for key in SAFE_FIELDS:
-            value = getattr(record, key, None)
+            value: object = getattr(record, key, None)
             if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value):
                 data[key] = value
-            elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-                data[key] = value
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    if math.isfinite(float(value)):
+                        data[key] = value
+                except OverflowError:
+                    pass
         if record.exc_info and record.exc_info[0]:
             data["error_type"] = record.exc_info[0].__name__
-        # Never serialize arbitrary record args, exception text, traceback locals,
-        # URLs, tokens, input/output payloads or the rest of LogRecord.__dict__.
         return json.dumps(data, separators=(",", ":"), allow_nan=False)
 
 
