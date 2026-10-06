@@ -1,23 +1,18 @@
-"""Temporary, allowlisted stage runner used only on the hardening branch."""
+"""Temporary stage runner; never shipped to main or a distribution."""
 import json
 import runpy
 from pathlib import Path
+from helpers import function
 
-request = json.loads(Path('.github/hardening/request.json').read_text())
-stage = request['stage']
+stage = json.loads(Path('.github/hardening/request.json').read_text())['stage']
 if stage not in {'baseline', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6'}:
     raise SystemExit('Unknown reviewed stage')
-runpy.run_path(str(Path('.github/hardening') / (stage + '.py')), run_name='__main__')
-if stage == 'phase1':
-    runpy.run_path('.github/hardening/phase1_after.py', run_name='__main__')
-    matrix = Path('scripts/codec_matrix.py')
-    matrix.write_text(matrix.read_text().replace('import sys\n', ''))
-if stage == 'phase2':
-    tests = Path('tests/test_phase2.py')
-    tests.write_text(tests.read_text().replace('mutate, new_run, route', 'mutate, route'))
+if stage != 'phase3' or not Path('docs/hardening/phase3.md').is_file():
+    runpy.run_path(str(Path('.github/hardening') / (stage + '.py')), run_name='__main__')
+    extra = Path('.github/hardening') / (stage + '_after.py')
+    if extra.is_file():
+        runpy.run_path(str(extra), run_name='__main__')
 if stage == 'phase3':
-    runpy.run_path('.github/hardening/phase3_after.py', run_name='__main__')
-    from helpers import function
     function('src/duraflow/observability.py', 'JsonLogFormatter.format', '''
     def format(self, record: logging.LogRecord) -> str:
         event = str(record.msg)
