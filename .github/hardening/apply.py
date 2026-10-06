@@ -12,3 +12,6 @@ if stage == 'phase1':
     runpy.run_path('.github/hardening/phase1_after.py', run_name='__main__')
     matrix = Path('scripts/codec_matrix.py')
     matrix.write_text(matrix.read_text().replace('import sys\n', ''))
+if stage == 'phase2':
+    tests = Path('tests/test_phase2.py')
+    tests.write_text(tests.read_text().replace('mutate, new_run, route', 'mutate, route'))
