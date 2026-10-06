@@ -1,4 +1,5 @@
 """Bounded service supervision. Hard process termination belongs to the CLI/supervisor."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,8 +17,17 @@ class ShutdownTimeout(RuntimeError):
     """A process supervisor must terminate the remaining execution context."""
 
 
-async def supervise(runtime: Any, transport: Any, store: Any, registry: Any, settings: RuntimeSettings,
-                    stop: asyncio.Event, *, role: str, on_hard_timeout: Callable[[], None] | None = None) -> None:
+async def supervise(
+    runtime: Any,
+    transport: Any,
+    store: Any,
+    registry: Any,
+    settings: RuntimeSettings,
+    stop: asyncio.Event,
+    *,
+    role: str,
+    on_hard_timeout: Callable[[], None] | None = None,
+) -> None:
     health = HealthState()
     runtime.health = health
     runtime.accepting, runtime.draining = False, False
@@ -57,7 +67,10 @@ async def supervise(runtime: Any, transport: Any, store: Any, registry: Any, set
     requested = asyncio.create_task(stop.wait())
     log.info("runtime_started", extra={"role": role})
     try:
-        done, _ = await asyncio.wait({running, requested}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait({running, requested, monitor_task}, return_when=asyncio.FIRST_COMPLETED)
+        if monitor_task in done and not stop.is_set():
+            await monitor_task
+            raise RuntimeError("Dependency monitor stopped unexpectedly")
         if running in done:
             await running
         else:
@@ -77,8 +90,11 @@ async def supervise(runtime: Any, transport: Any, store: Any, registry: Any, set
         monitor_task.cancel()
         if not running.done():
             running.cancel()
-        cleanup = [asyncio.create_task(runtime.close()), asyncio.create_task(transport.close()),
-                   asyncio.create_task(probes.close())]
+        cleanup = [
+            asyncio.create_task(runtime.close()),
+            asyncio.create_task(transport.close()),
+            asyncio.create_task(probes.close()),
+        ]
         all_tasks = {running, requested, monitor_task, *cleanup}
         done, pending = await asyncio.wait(all_tasks, timeout=min(settings.shutdown_timeout, 5))
         for task in done:

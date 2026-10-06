@@ -1,4 +1,5 @@
 """Payload-free operational logs, bounded metric labels and read-only probes."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,23 +12,61 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+EVENTS = frozenset(
+    {
+        "runtime_message",
+        "engine_iteration_failed",
+        "worker_iteration_failed",
+        "task_claimed",
+        "task_observed",
+        "workflow_state_saved",
+        "shutdown_requested",
+        "shutdown_incomplete",
+        "runtime_started",
+        "runtime_stopped",
+        "dependency_state",
+        "message_quarantined",
+        "dlq_requeued",
+    }
+)
 SAFE_FIELDS = frozenset({"run_id", "task_id", "node_id", "attempt", "epoch", "event_id", "error_type", "code", "role"})
-COUNTERS = frozenset({"activations", "cas_conflicts", "publications", "transport_errors", "unsupported_activations",
-                      "executed", "duplicates", "stale_results", "quarantined"})
-STATUSES = ("PENDING", "WAITING", "BLOCKED", "CANCELLING", "COMPLETED", "FAILED", "CANCELLED", "TERMINATED", "CONTINUED")
+COUNTERS = frozenset(
+    {
+        "activations",
+        "cas_conflicts",
+        "publications",
+        "transport_errors",
+        "unsupported_activations",
+        "executed",
+        "duplicates",
+        "stale_results",
+        "quarantined",
+    }
+)
+STATUSES = (
+    "PENDING",
+    "WAITING",
+    "BLOCKED",
+    "CANCELLING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TERMINATED",
+    "CONTINUED",
+)
 
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         event = str(record.msg)
-        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event):
+        if event not in EVENTS:
             event = "runtime_message"
         data: dict[str, Any] = {"time": record.created, "level": record.levelname, "event": event}
         for key in SAFE_FIELDS:
             value = getattr(record, key, None)
             if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value):
                 data[key] = value
-            elif type(value) in (int, float) and math.isfinite(value):
+            elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
                 data[key] = value
         if record.exc_info and record.exc_info[0]:
             data["error_type"] = record.exc_info[0].__name__
@@ -68,12 +107,17 @@ def render_metrics(runtime: Any, health: HealthState, role: str) -> str:
     for key in sorted(COUNTERS):
         if key in runtime.metrics:
             lines.append(f'duraflow_{key}_total{{role="{role}"}} {int(runtime.metrics[key])}')
-    lines.extend([
-        f'duraflow_ready{{role="{role}"}} {int(health.ready and not health.draining)}',
-        f'duraflow_draining{{role="{role}"}} {int(health.draining)}',
-        f'duraflow_uptime_seconds{{role="{role}"}} {max(0, time.monotonic() - health.started_at):.3f}',
-        f'duraflow_due_work_lag_seconds{{role="{role}"}} {max(0, float(health.stats.get("due_lag", 0))):.3f}',
-    ])
+    lines.extend(
+        [
+            f'duraflow_ready{{role="{role}"}} {int(health.ready and not health.draining)}',
+            f'duraflow_draining{{role="{role}"}} {int(health.draining)}',
+            f'duraflow_uptime_seconds{{role="{role}"}} {max(0, time.monotonic() - health.started_at):.3f}',
+            f'duraflow_due_work_lag_seconds{{role="{role}"}} {max(0, float(health.stats.get("due_lag", 0))):.3f}',
+        ]
+    )
+    lines.append(
+        f'duraflow_sampled_outbox_age_seconds{{role="{role}"}} {max(0, float(health.stats.get("outbox_age", 0))):.3f}'
+    )
     counts = health.stats.get("statuses", {})
     for status in STATUSES:
         lines.append(f'duraflow_runs{{role="{role}",status="{status}"}} {int(counts.get(status, 0))}')
@@ -87,14 +131,17 @@ async def sample_health(store: Any, transport: Any, registry: Any, role: str, *,
             return await version() == 2
         await store.scan("default", limit=1)
         return True
+
     async def broker() -> bool:
         ping = getattr(transport, "ping", None)
         return True if ping is None else bool(await ping())
+
     async def guarded(fn: Any) -> bool:
         try:
             return bool(await asyncio.wait_for(fn(), timeout))
         except Exception:
             return False
+
     db, messaging = await asyncio.gather(guarded(database), guarded(broker))
     registered = bool(registry.workflows if role == "engine" else registry.tasks)
     return {"database": db, "broker": messaging, "registry": registered}
@@ -131,14 +178,19 @@ class ProbeServer:
             elif parts[1] == b"/ready":
                 ready = self.health.readiness(self.max_age)
                 status = 200 if ready else 503
-                body = json.dumps({"ready": ready, "draining": self.health.draining, "checks": self.health.checks}).encode()
+                body = json.dumps(
+                    {"ready": ready, "draining": self.health.draining, "checks": self.health.checks}
+                ).encode()
                 content_type = "application/json"
             elif parts[1] == b"/metrics":
                 status, body = 200, render_metrics(self.runtime, self.health, self.role).encode()
                 content_type = "text/plain; version=0.0.4"
             else:
                 status, body, content_type = 404, b"{}", "application/json"
-            writer.write(f"HTTP/1.0 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+            writer.write(
+                f"HTTP/1.0 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
+            )
             await asyncio.wait_for(writer.drain(), 1.0)
         except (TimeoutError, ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             pass

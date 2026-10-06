@@ -1,0 +1,23 @@
+groups:
+  - name: duraflow
+    rules:
+      - alert: DuraflowNotReady
+        expr: duraflow_ready == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Duraflow is not accepting new work"}
+      - alert: DuraflowTransportFailures
+        expr: rate(duraflow_transport_errors_total[5m]) > 0.1
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Duraflow broker publication failures are recurring"}
+      - alert: DuraflowBlockedRuns
+        expr: duraflow_runs{status="BLOCKED"} > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Duraflow has blocked runs requiring diagnosis"}
+      - alert: DuraflowOutboxDelay
+        expr: duraflow_sampled_outbox_age_seconds > 60
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Sampled Duraflow outbox entries are overdue"}

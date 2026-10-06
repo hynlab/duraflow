@@ -1,4 +1,5 @@
 """Validated runtime limits. Secrets are excluded from representations and diagnostics."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
@@ -35,16 +36,32 @@ class RuntimeSettings:
     def __post_init__(self) -> None:
         name(self.namespace)
         for key, low, high in (
-            ("concurrency", 1, 256), ("pool_size", 1, 100), ("batch_size", 1, 1000),
-            ("max_commands", 1, 10000), ("receiver_queue_size", 1, 10000),
-            ("max_routes", 1, 4096), ("replay_workers", 1, 32),
+            ("concurrency", 1, 256),
+            ("pool_size", 1, 100),
+            ("batch_size", 1, 1000),
+            ("max_commands", 1, 10000),
+            ("receiver_queue_size", 1, 10000),
+            ("max_routes", 1, 4096),
+            ("replay_workers", 1, 32),
         ):
             value = getattr(self, key)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"Invalid {key}")
-        for key in ("lease_seconds", "operation_timeout", "statement_timeout", "lock_timeout",
-                    "replay_timeout", "shutdown_timeout", "poll_interval", "probe_interval", "probe_timeout"):
-            duration(getattr(self, key))
+        for key in (
+            "lease_seconds",
+            "operation_timeout",
+            "statement_timeout",
+            "lock_timeout",
+            "replay_timeout",
+            "shutdown_timeout",
+            "poll_interval",
+            "probe_interval",
+            "probe_timeout",
+        ):
+            value = getattr(self, key)
+            if type(value) not in (int, float):
+                raise ValueError(f"Invalid {key}")
+            duration(value)
         if not self.lock_timeout < self.statement_timeout < self.operation_timeout:
             raise ValueError("Require lock_timeout < statement_timeout < operation_timeout")
         if self.lease_seconds < 3 * self.statement_timeout:
