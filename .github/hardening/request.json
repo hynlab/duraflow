@@ -1,1 +1,1 @@
-{"stage":"baseline","message":"style: establish formatting and fail-closed validation baseline (A01)"}
+{"stage":"phase1","message":"feat: isolate replay and version lifecycle ordering (A02-A06)"}
