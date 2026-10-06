@@ -1,4 +1,3 @@
-from pathlib import Path
 from helpers import write
 
 write('Makefile', '''
@@ -83,26 +82,19 @@ if __name__ == "__main__":
         raise SystemExit("\\n".join(failures))
     print("Coverage gate passed; native failure, soak and pilot evidence are separate gates")
 ''')
-ci = Path('.github/workflows/ci.yml')
-text = ci.read_text().replace('      - run: make lint\n', '      - run: make format-check\n      - run: make lint\n')
-text = text.replace('run: PYTHONPATH=src:. pytest -v --cov=duraflow --cov-report=term-missing --cov-report=xml', 'run: make native-check')
-ci.write_text(text)
-publish = Path('.github/workflows/publish.yml')
-text = publish.read_text().replace('run: make lint && make typecheck', 'run: make format-check && make lint && make typecheck')
-text = text.replace('PYTHONPATH=src:. pytest -v\n', 'make native-check\n')
-publish.write_text(text)
 write('docs/hardening/baseline.md', '''
 # A01 acceptance baseline
 
 Baseline: f360e1d1dd4c1f809bb88fa8c6ddeb608129fb7f, published alpha 0.1.0a1.
 Scope: trusted internal PostgreSQL/Pulsar deployment, not public multi-tenancy.
-The existing test suite is retained. A separate mechanical formatting commit
-establishes the Ruff formatting baseline before lifecycle implementation.
+The existing test suite is retained. This mechanical formatting commit establishes
+the Ruff formatting baseline before lifecycle implementation.
 
 Shared commands: make check; make native-check; python -m build; twine check.
 Required native validation errors on absent endpoints, fewer than two native
 cases, or skipped test reports. It is not acceptable to claim a skipped service
-was exercised. CI and publishing use the same native command.
+was exercised. CI/publishing wiring is reviewed separately; this application
+change does not modify workflow permissions or workflow files.
 
 The candidate coverage report is an artifact, not an assertion that the production
 gate passed. make production-gate requires 80% overall branch-aware coverage and
