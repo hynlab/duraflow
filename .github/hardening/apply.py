@@ -8,3 +8,5 @@ stage = request['stage']
 if stage not in {'baseline', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6'}:
     raise SystemExit('Unknown reviewed stage')
 runpy.run_path(str(Path('.github/hardening') / (stage + '.py')), run_name='__main__')
+if stage == 'phase1':
+    runpy.run_path('.github/hardening/phase1_after.py', run_name='__main__')
