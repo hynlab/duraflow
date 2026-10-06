@@ -19,6 +19,16 @@ JVM interoperability or external exactly-once guarantee is asserted.
 | Transport | Memory and optional official Pulsar client, scoped subscriptions, bounded queues |
 | Delivery | CLI, installable wheel/sdist, typed marker, examples, local compose, CI |
 
+## Verified GitHub CI
+
+All four jobs passed for source commit
+`70e82c38cfe0a78ab025dcba94b89a88a5d55004` in
+[CI run 37522053193](https://github.com/hynlab/duraflow/actions/runs/37522053193):
+Python 3.12 tests/build, Python 3.13 tests/build, Ruff/mypy quality checks, and
+native PostgreSQL 16 plus Pulsar 4.0.3 integration. Both examples and distribution
+license/typed-marker inspection passed. See [verification.md](verification.md).
+These are actual native-service functional tests, not merely adapter mocks.
+
 ## Local evidence
 
 The authored test suite was executed on Python 3.13.5 with Pydantic 2.13.4:
@@ -38,8 +48,8 @@ A separate subprocess check varies PYTHONHASHSEED.
 
 Both runnable examples, the CLI help path and local wheel/sdist creation were
 executed. The wheel contains Apache-2.0 metadata and the typed marker. Native
-services, Ruff and mypy require the configured CI environment and are not marked
-locally verified merely because their adapters or commands exist.
+services, Ruff and mypy were verified separately in the GitHub CI environment
+above; they were not available in the isolated local runtime.
 
 ## Acceptance coverage against the planning baseline
 
@@ -55,7 +65,7 @@ locally verified merely because their adapters or commands exist.
 | Version and errors | Missing/mismatching workflow blocks; remote error data avoids arbitrary object transport |
 | Composition | Child and rollover tests, deterministic race, typed delegated completion including early callback |
 | Security and retention | Strict JSON, size/type checks, malformed identity rejection, explicit archive horizon |
-| Native adapter behavior | Executable CI integration tests; native production failure matrix still requires qualification |
+| Native adapter behavior | Native CI passed; production crash/restore/failure matrix still requires qualification |
 | Performance/operations | Bounded configuration and diagnostics implemented; workload and 24-hour soak gates remain open |
 
 ## Explicit deviations and limits
