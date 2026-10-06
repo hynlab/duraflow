@@ -15,8 +15,8 @@ from typing import Any, Callable, Generic, TypeVar, get_type_hints
 
 from pydantic import TypeAdapter
 
-I = TypeVar("I")
-O = TypeVar("O")
+InputT = TypeVar("InputT")
+OutputT = TypeVar("OutputT")
 F = TypeVar("F", bound=Callable[..., Any])
 MAX_PAYLOAD_BYTES = 262_144
 PROTOCOL_VERSION = 1
@@ -199,7 +199,7 @@ class TaskOptions:
 
 
 @dataclass(frozen=True)
-class TaskRef(Generic[I, O]):
+class TaskRef(Generic[InputT, OutputT]):
     name: str
     input_type: Any = Any
     output_type: Any = Any
@@ -220,12 +220,12 @@ class TaskRef(Generic[I, O]):
 
 
 @dataclass(frozen=True)
-class WorkflowRef(TaskRef[I, O]):
+class WorkflowRef(TaskRef[InputT, OutputT]):
     pass
 
 
 @dataclass(frozen=True)
-class TopicRef(Generic[I]):
+class TopicRef(Generic[InputT]):
     name: str
     payload_type: Any = Any
 
@@ -235,8 +235,8 @@ class TopicRef(Generic[I]):
 
 
 @dataclass(frozen=True)
-class HandlerRef(Generic[I, O]):
-    task: TaskRef[I, O]
+class HandlerRef(Generic[InputT, OutputT]):
+    task: TaskRef[InputT, OutputT]
     subscription: str
 
     def __post_init__(self) -> None:
@@ -244,7 +244,7 @@ class HandlerRef(Generic[I, O]):
 
 
 @dataclass(frozen=True)
-class SignalRef(Generic[I]):
+class SignalRef(Generic[InputT]):
     name: str
     payload_type: Any = Any
 
