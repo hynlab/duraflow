@@ -52,6 +52,9 @@ jobs:
             git push origin HEAD:refs/heads/hardening/security-retention
           fi
           echo "Verified source commit: $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Source-only diagnostic snapshot
+        if: always()
+        run: python .github/hardening/snapshot.py
       - name: Diagnostics
         if: failure()
         run: docker compose logs --tail=100 || true
@@ -66,6 +69,8 @@ jobs:
             native-results.xml
             fault-results.xml
             qualification-results.json
+            source-snapshot.zip
+            dist/*
           if-no-files-found: ignore
       - if: always()
         run: docker compose down -v

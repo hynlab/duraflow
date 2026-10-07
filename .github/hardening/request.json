@@ -1,1 +1,1 @@
-{"stage":"phase5","message":"test: verify physical PostgreSQL WAL recovery with independent external effects (E05)"}
+{"stage":"phase5","message":"test: verify native concurrent starts, signals, rollover, children and control races (E06)"}
