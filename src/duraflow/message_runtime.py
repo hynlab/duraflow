@@ -66,21 +66,23 @@ class Consumer:
 
     async def process(self, delivery: Delivery) -> None:
         try:
-            raw = delivery.properties.get("duraflow-v2")
-            message = Message.from_bytes(raw.encode() if raw is not None else delivery.data)
-            if delivery.key is not None and delivery.key != message.key:
-                raise ProtocolError("Broker key differs from message identity")
-            await self.handle(message, delivery)
-            await self.transport.ack(delivery)
-            self.metrics["messages"] += 1
+            try:
+                raw = delivery.properties.get("duraflow-v2")
+                message = Message.from_bytes(raw.encode() if raw is not None else delivery.data)
+                if delivery.key is not None and delivery.key != message.key:
+                    raise ProtocolError("Broker key differs from message identity")
+                await self.handle(message, delivery)
+            except ProtocolError as exc:
+                await self.transport.publish(
+                    delivery.topic + "-dlq", delivery.data[:262144], {"reason": type(exc).__name__}, key=delivery.key
+                )
+                await self.transport.ack(delivery)
+                self.metrics["errors"] += 1
+            else:
+                await self.transport.ack(delivery)
+                self.metrics["messages"] += 1
         except RetryLater:
             await self.transport.nack(delivery)
-        except ProtocolError as exc:
-            await self.transport.publish(
-                delivery.topic + "-dlq", delivery.data[:262144], {"reason": type(exc).__name__}, key=delivery.key
-            )
-            await self.transport.ack(delivery)
-            self.metrics["errors"] += 1
         except BaseException:
             await self.transport.nack(delivery)
             raise
