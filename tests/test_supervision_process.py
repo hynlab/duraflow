@@ -4,6 +4,8 @@ import signal
 import subprocess
 import sys
 
+import pytest
+
 
 def test_stuck_synchronous_worker_process_obeys_hard_shutdown_boundary():
     process = subprocess.Popen(
@@ -14,7 +16,10 @@ def test_stuck_synchronous_worker_process_obeys_hard_shutdown_boundary():
         env={**os.environ},
     )
     try:
-        assert select.select([process.stdout], [], [], 10)[0]
+        if not select.select([process.stdout], [], [], 10)[0]:
+            process.kill()
+            _, stderr = process.communicate(timeout=5)
+            pytest.fail("Shutdown fixture did not start: " + stderr[-2000:])
         assert process.stdout.readline().strip() == "READY"
         process.send_signal(signal.SIGTERM)
         process.communicate(timeout=5)

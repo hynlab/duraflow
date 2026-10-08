@@ -9,6 +9,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .contracts import duration
+
 
 @dataclass
 class Delivery:
@@ -91,11 +93,13 @@ class PulsarTransport:
         max_routes: int = 256,
         authentication: Any = None,
         tls_trust_certs_file_path: str | None = None,
+        operation_timeout: float = 10.0,
     ):
         import pulsar
 
         if receiver_queue_size < 1 or max_routes < 1:
             raise ValueError("Queue size and route limit must be positive")
+        duration(operation_timeout)
         options: dict[str, Any] = {
             "operation_timeout_seconds": 10,
             "connection_timeout_ms": 5000,
@@ -114,6 +118,8 @@ class PulsarTransport:
         self.lock = asyncio.Lock()
         self.native_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="duraflow-pulsar")
         self.native_slots = asyncio.Semaphore(8)
+        self.operation_timeout = operation_timeout
+        self._closed = False
 
     async def ensure(self, topic: str, subscription: str) -> None:
         async with self.lock:
@@ -175,14 +181,21 @@ class PulsarTransport:
         await self._native(self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt)
 
     async def close(self) -> None:
+        if self._closed:
+            return
         try:
             await self._native(self.client.close)
         finally:
+            self._closed = True
             self.native_pool.shutdown(wait=False, cancel_futures=True)
 
     async def _native(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
-        await self.native_slots.acquire()
+        if self._closed:
+            raise RuntimeError("Pulsar transport is closed")
+        await asyncio.wait_for(self.native_slots.acquire(), timeout=self.operation_timeout)
         try:
+            if self._closed:
+                raise RuntimeError("Pulsar transport is closed")
             future = asyncio.get_running_loop().run_in_executor(self.native_pool, partial(fn, *args, **kwargs))
         except BaseException:
             self.native_slots.release()
@@ -194,7 +207,7 @@ class PulsarTransport:
                 done.exception()
 
         future.add_done_callback(released)
-        return await asyncio.shield(future)
+        return await asyncio.wait_for(asyncio.shield(future), timeout=self.operation_timeout)
 
     async def ping(self) -> bool:
         topic = next(iter(self.provisioned))[0] if self.provisioned else "persistent://public/default/df-health"

@@ -141,6 +141,7 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
         tls_trust_certs_file_path=settings.pulsar_tls_ca,
         receiver_queue_size=settings.receiver_queue_size,
         max_routes=settings.max_routes,
+        operation_timeout=settings.operation_timeout,
     )
     if args.command == "engine":
         runtime: Any = Engine(

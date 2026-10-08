@@ -6,12 +6,16 @@ import os
 import signal
 import time
 
-from duraflow import Registry
+from duraflow import Registry, TaskRef, task
 from duraflow.config import RuntimeSettings
 from duraflow.storage import MemoryStore
 from duraflow.supervision import supervise
 from duraflow.transport import MemoryTransport
-from tests.test_engine import double
+
+
+@task(ref=TaskRef("supervision-ready", int, int))
+def ready_task(value: int) -> int:
+    return value
 
 
 class Runtime:
@@ -36,7 +40,7 @@ async def main():
         Runtime(),
         MemoryTransport(),
         MemoryStore(),
-        Registry(double),
+        Registry(ready_task),
         settings,
         stop,
         role="worker",

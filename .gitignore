@@ -20,3 +20,9 @@ dist/
 !.env.example
 *.pem
 *.key
+coverage.json
+test-results.xml
+native-results.xml
+fault-results.xml
+qualification-results.json
+source-snapshot.zip

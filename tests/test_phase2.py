@@ -55,6 +55,8 @@ async def test_native_cancel_keeps_capacity_until_real_call_finishes():
     transport = object.__new__(PulsarTransport)
     transport.native_pool = ThreadPoolExecutor(max_workers=1)
     transport.native_slots = asyncio.Semaphore(1)
+    transport.operation_timeout = 3
+    transport._closed = False
     started, release = threading.Event(), threading.Event()
 
     def blocked():

@@ -65,8 +65,14 @@ class ProcessReplayExecutor:
         self._processes: set[asyncio.subprocess.Process] = set()
         self._closed = False
 
-    async def _discard(self, process: asyncio.subprocess.Process) -> None:
+    async def _discard(self, process: asyncio.subprocess.Process, *, graceful: bool = False) -> None:
         self._processes.discard(process)
+        if graceful and process.returncode is None and process.stdin is not None:
+            process.stdin.close()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
         if process.returncode is None:
             try:
                 process.kill()
@@ -155,7 +161,7 @@ class ProcessReplayExecutor:
     async def close(self) -> None:
         self._closed = True
         self._idle.clear()
-        await asyncio.gather(*(self._discard(p) for p in list(self._processes)))
+        await asyncio.gather(*(self._discard(p, graceful=True) for p in list(self._processes)))
 
     async def __aenter__(self) -> ProcessReplayExecutor:
         return self

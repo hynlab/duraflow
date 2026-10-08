@@ -9,6 +9,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  qualification:
+    uses: ./.github/workflows/hardening.yml
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 10

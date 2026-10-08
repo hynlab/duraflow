@@ -1,25 +1,37 @@
 .PHONY: check test integration native-check lint typecheck format format-check build production-gate
+PYTHON ?= python
 check: format-check lint typecheck test
 lint:
-	ruff check src tests examples scripts
+	$(PYTHON) -m ruff check src tests examples scripts
 format:
-	ruff format src tests examples scripts
+	$(PYTHON) -m ruff format src tests examples scripts
 format-check:
-	ruff format --check src tests examples scripts
+	$(PYTHON) -m ruff format --check src tests examples scripts
 typecheck:
-	mypy src/duraflow
+	$(PYTHON) -m mypy src/duraflow
 test:
-	PYTHONPATH=src:. pytest -m 'not integration' --cov=duraflow --cov-report=term-missing --junitxml=test-results.xml
+	PYTHONPATH=src:. $(PYTHON) -m pytest -m 'not integration' --cov=duraflow --cov-report=term-missing --junitxml=test-results.xml
 integration:
-	PYTHONPATH=src:. pytest -m integration -v
+	PYTHONPATH=src:. $(PYTHON) -m pytest -m integration -v
 native-check:
-	python scripts/codec_matrix.py
-	DURAFLOW_REQUIRE_NATIVE=1 PYTHONPATH=src:. pytest -v --cov=duraflow --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=native-results.xml
+	$(PYTHON) scripts/codec_matrix.py
+	DURAFLOW_REQUIRE_NATIVE=1 PYTHONPATH=src:. $(PYTHON) -m pytest -m 'not fault' -v --cov=duraflow --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=native-results.xml
 production-gate:
-	python scripts/production_gate.py coverage.json
+	$(PYTHON) scripts/production_gate.py coverage.json
 build:
-	python -m build
+	$(PYTHON) -m build
 
 .PHONY: codec-check
 codec-check:
-	python scripts/codec_matrix.py
+	$(PYTHON) scripts/codec_matrix.py
+
+.PHONY: native-fault-check
+native-fault-check:
+	$(PYTHON) scripts/fault_guard.py
+	DURAFLOW_REQUIRE_NATIVE=1 PYTHONPATH=src:. $(PYTHON) -m pytest -m fault -v --cov=duraflow --cov-append --cov-report=json --cov-report=xml --junitxml=fault-results.xml
+
+.PHONY: qualification-check
+qualification-check:
+	$(MAKE) native-check
+	$(MAKE) native-fault-check
+	$(MAKE) production-gate

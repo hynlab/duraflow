@@ -267,12 +267,8 @@ class Engine:
             )
         except Conflict as exc:
             raise WorkflowBlocked("Child identity or pinned implementation conflict") from exc
-        result = await child.describe()
+        result = await self._follow_continued(await child.describe())
         node["child_started"] = True
-        for _ in range(100):
-            if result["status"] != "CONTINUED":
-                break
-            result = await self.store.load(self.namespace, result["continued_run_id"])
         if result["status"] == "COMPLETED":
             finish_node(state, node, now, result=result["result"])
         elif result["status"] in TERMINAL:
@@ -387,13 +383,8 @@ class Engine:
             try:
                 child_id = node["child_run_id"]
                 child = await self.store.load(self.namespace, child_id)
-                for _ in range(100):
-                    if child["status"] != "CONTINUED":
-                        break
-                    child_id = child["continued_run_id"]
-                    child = await self.store.load(self.namespace, child_id)
-                else:
-                    raise Conflict("Child continuation chain exceeds the reconciliation bound")
+                child = await self._follow_continued(child)
+                child_id = child["run_id"]
                 if child["status"] not in TERMINAL | {"CANCELLING"}:
                     await self.client.get_handle(child_id)._control(
                         "cancel",
@@ -409,11 +400,21 @@ class Engine:
                         current["child_close_confirmed"] = True
 
                 await mutate(self.store, self.namespace, run_id, confirmed)
-            except (Conflict, NotFound):
+            except (Conflict, NotFound, WorkflowBlocked):
                 # Missing is not evidence that a concurrent child-start cannot commit.
                 pass
 
+    async def _follow_continued(self, child: State) -> State:
+        for _ in range(100):
+            if child["status"] != "CONTINUED":
+                return child
+            child = await self.store.load(self.namespace, child["continued_run_id"])
+        if child["status"] == "CONTINUED":
+            raise WorkflowBlocked("Child continuation chain exceeds the reconciliation bound")
+        return child
+
     async def flush(self, run_id: str, limit: int = 32) -> None:
+        failures: list[Exception] = []
         for _ in range(limit):
             owner = str(uuid4())
 
@@ -438,7 +439,7 @@ class Engine:
 
             claimed = await mutate(self.store, self.namespace, run_id, claim)
             if claimed is None:
-                return
+                break
             event_id, item = claimed
             try:
                 await asyncio.wait_for(
@@ -448,6 +449,7 @@ class Engine:
                     timeout=10,
                 )
             except Exception as exc:
+                failures.append(exc)
                 self.metrics["transport_errors"] += 1
                 error_type = type(exc).__name__
 
@@ -461,7 +463,7 @@ class Engine:
                         current["last_error_type"] = error_type
 
                 await mutate(self.store, self.namespace, run_id, release)
-                raise
+                continue
 
             def delivered(state: State) -> None:
                 current = state["outbox"].get(event_id)
@@ -471,6 +473,8 @@ class Engine:
 
             await mutate(self.store, self.namespace, run_id, delivered)
             self.metrics["publications"] += 1
+        if failures:
+            raise failures[0]
 
     async def tick(self) -> int:
         due = getattr(self.store, "scan_due", None)

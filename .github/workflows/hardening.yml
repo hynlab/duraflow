@@ -1,0 +1,49 @@
+name: Native qualification
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'hynlab/duraflow'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: duraflow-qualification-${{ github.run_id }}
+      DURAFLOW_TEST_POSTGRES: postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow
+      DURAFLOW_TEST_PULSAR: pulsar://localhost:6650
+      DURAFLOW_ALLOW_DESTRUCTIVE_TESTS: isolated-compose
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev,postgres,pulsar]' 'twine>=6.1,<8'
+      - run: make check
+      - run: docker compose up -d --wait --wait-timeout 240
+      - run: make qualification-check
+      - run: python -m build && python -m twine check --strict dist/*
+      - name: Record exact inspected source
+        run: git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
+      - name: Infrastructure diagnostics
+        if: failure()
+        run: docker compose logs --tail=100
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-evidence
+          path: |
+            coverage.xml
+            coverage.json
+            test-results.xml
+            native-results.xml
+            fault-results.xml
+            qualification-results.json
+            dist/*
+          if-no-files-found: ignore
+      - name: Stop isolated qualification services
+        if: always()
+        run: docker compose down -v
