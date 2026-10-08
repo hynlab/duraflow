@@ -24,6 +24,8 @@ tests the base dependencies plus `.[dev]` tools. Choose an interpreter with
 | `make native-check` | Required real-service tests, including protocol-2 process recovery |
 | `make native-fault-check` | Explicitly guarded destructive Compose service tests |
 | `make qualification-check` | Native checks, destructive tests, and coverage gate |
+| `make message-soak-check` | 30-minute real-service workload with rolling role failures |
+| `make extended-check` | Quality, native/fault qualification, sustained workload, and build |
 | `make build` | Source and wheel distributions |
 
 ## Local message-driven tests
@@ -115,12 +117,56 @@ make qualification-check
 
 The guard validates project naming, container ownership, service identity, and
 loopback port bindings. Required-native mode rejects missing endpoints and skips.
-Existing physical restore evidence exercises the legacy runtime; it is not evidence
-of a protocol-2 database rollback/reconciliation qualification.
+`tests/test_message_pitr.py` also exercises protocol-2 physical WAL restore with
+both a restored and a newer task journal. It explicitly reissues an acknowledged
+signal after restoring the workflow journal; this is **operator-assisted command
+replay**, not automatic reconciliation of arbitrarily rolled-back databases with
+advanced broker cursors. The broker and the external effect ledger remain current.
 
 JUnit and coverage reports are produced by the Makefile. The established coverage
 gate is distinct from behavioral fault tests. Do not infer new-runtime production
 qualification solely from an earlier coverage report.
+
+### Expanded protocol-2 qualification
+
+See [the scenario catalog](../docs/qualification.md) for assertions, reproduction
+commands, and limits. The additional suites cover:
+
+- The same inbox/state/outbox contract on Memory, SQLite, and PostgreSQL, including
+  concurrent connections, identity collisions, type distinctions, and disk quota failure.
+- Publication/ACK/DLQ failures, stale owners, malformed envelopes, replay divergence,
+  task deadlines, child cancellation, delegation, and paginated task-tag recovery.
+- Hypothesis state machines (40 histories × up to 60 actions per local backend).
+- Two independent engines and replay workers, 1/2/4 task workers, duplicate requests,
+  process commit boundaries, graceful role replacement, and terminal-state races.
+- A real TCP proxy that partitions an engine's database link; broker restart/pause
+  and topic unload are exercised against guarded, owned Compose infrastructure.
+
+The Makefile runs pytest through `scripts/pytest_guard.py`. Tests have a 180-second
+watchdog (300 seconds for physical restore); the outer supervisor cleans registered
+process groups, paused/stopped services, and interrupted PITR resources after a hard
+pytest exit. Direct `python -m pytest` is useful for unit development; use the guarded
+commands for native destructive qualification.
+
+With the isolated endpoints above still configured, run the sustained profile:
+
+```bash
+make message-soak-check                    # SOAK_SECONDS=1800 by default
+make message-soak-check SOAK_SECONDS=3600   # one hour
+make extended-check                       # includes the destructive opt-in above
+```
+
+It asserts completed results, independent accepted effects, stable call counts for
+settled-work restarts, and an empty outbox at the end. `soak-results.json` reports
+batch latency percentiles, restart events, and aggregate **direct role-process** RSS;
+RSS excludes replay children and server containers and is not a memory-leak proof.
+`task-tags` is restarted as an idle role in this workload; its cancellation/fan-out
+behavior has separate behavioral tests. Logs go to a unique directory under
+`qualification-artifacts/`. A manual GitHub workflow runs the same sustained profile.
+
+Preserve JUnit, coverage, and soak reports with the tested revision before another
+run overwrites the top-level reports. WAL/base backups are intentionally excluded
+from report artifacts and are removed from the disposable primary after PITR.
 
 Remove the disposable environment after testing:
 
