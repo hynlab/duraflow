@@ -19,6 +19,7 @@ from duraflow import LegacyClient as Client
 from duraflow.postgres import PostgresStore
 from duraflow.transport import PulsarTransport
 from scripts.fault_guard import owned_service, project_name
+from scripts.pytest_guard import record_resource, terminate_group
 from tests.native_fault_app import initialize_ledger, pipeline, registry, topic
 
 
@@ -39,6 +40,8 @@ class NativeCluster:
         project_name()
         self.root = root
         self.namespace = "fault_" + uuid4().hex[:12]
+        self.run_id = os.getenv("DURAFLOW_TEST_RUN_ID", uuid4().hex)
+        self.terminated = set()
         self.schema = self.namespace
         self.url = os.environ["DURAFLOW_TEST_POSTGRES"]
         self.processes = {}
@@ -72,6 +75,7 @@ class NativeCluster:
         env = {
             **os.environ,
             "DURAFLOW_TEST_POSTGRES": self.url,
+            "DURAFLOW_TEST_RUN_ID": self.run_id,
             "DURAFLOW_FAULT_SCHEMA": self.schema,
             "DURAFLOW_FAULT_NAMESPACE": self.namespace,
             "DURAFLOW_FAULT_DIRECTORY": str(self.root),
@@ -89,6 +93,7 @@ class NativeCluster:
             start_new_session=True,
         )
         self.processes[key] = process
+        record_resource("process", pid=process.pid)
 
         def ready():
             if process.poll() is not None:
@@ -99,12 +104,11 @@ class NativeCluster:
 
     async def kill(self, key):
         process = self.processes.get(key)
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if process is not None and process.pid not in self.terminated:
+            await asyncio.to_thread(terminate_group, process.pid, self.run_id, signal.SIGKILL)
             await asyncio.to_thread(process.wait, timeout=10)
+            self.terminated.add(process.pid)
+            record_resource("process", pid=process.pid, released=True)
 
     async def kill_all(self):
         for key in self.processes:
@@ -147,12 +151,21 @@ class NativeCluster:
 
     async def output_ids(self):
         found = set()
-        for _ in range(20):
+
+        async def first_output():
             item = await self.broker.receive(topic(self.namespace, "output").name, "verification", timeout=0.2)
             if item is None:
-                break
+                return False
             found.add(json.loads(item.properties["duraflow"])["event_id"])
             await self.broker.ack(item)
+            return True
+
+        # A fresh receive can time out while its consumer is reconnecting even
+        # though the producer already has a durable publication acknowledgement.
+        await eventually(first_output, timeout=30, description="reconnected output subscription")
+        for _ in range(20):
+            if not await first_output():
+                break
         assert len(found) == 1
         return found
 

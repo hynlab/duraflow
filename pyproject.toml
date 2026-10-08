@@ -23,7 +23,7 @@ classifiers = ["Programming Language :: Python :: 3", "Typing :: Typed"]
 # Compatibility aliases: adapters are included in the base installation.
 postgres = []
 pulsar = []
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "pytest-cov>=7,<8", "coverage[toml]>=7.10.6,<8", "hypothesis>=6,<7", "ruff>=0.11,<1", "mypy>=1.15,<2", "build>=1.2,<2"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "pytest-cov>=7,<8", "pytest-timeout>=2.4,<3", "coverage[toml]>=7.10.6,<8", "hypothesis>=6,<7", "ruff>=0.11,<1", "mypy>=1.15,<2", "build>=1.2,<2"]
 
 [project.scripts]
 duraflow = "duraflow.cli:main"
@@ -37,6 +37,8 @@ duraflow = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+timeout = 180
+timeout_method = "thread"
 markers = ["fault: destructive tests on explicitly opted-in isolated Compose services", "integration: requires native PostgreSQL and/or Pulsar services"]
 
 [tool.ruff]

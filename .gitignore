@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 .hypothesis/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 .venv/
@@ -26,3 +27,5 @@ native-results.xml
 fault-results.xml
 qualification-results.json
 source-snapshot.zip
+soak-results.json
+qualification-artifacts/

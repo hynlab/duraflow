@@ -15,14 +15,14 @@ class PostgresMessageStore:
     def __init__(self, url: str, *, schema: str = "duraflow_messages", **options: Any):
         self.database = PostgresStore(url, schema=schema, **options)
         from sqlalchemy import Column, Float, Index, MetaData, String, Table
-        from sqlalchemy.dialects.postgresql import JSONB
+        from sqlalchemy.dialects.postgresql import JSON
 
         self.metadata = MetaData(schema=schema)
         self.states = Table(
             "states",
             self.metadata,
             Column("key", String(1024), primary_key=True),
-            Column("document", JSONB, nullable=False),
+            Column("document", JSON, nullable=False),
         )
         self.inbox = Table(
             "inbox",
@@ -35,7 +35,7 @@ class PostgresMessageStore:
             "outbox",
             self.metadata,
             Column("id", String(128), primary_key=True),
-            Column("document", JSONB, nullable=False),
+            Column("document", JSON, nullable=False),
             Column("owner", String(64)),
             Column("lease_until", Float, nullable=False, default=0),
         )
@@ -57,11 +57,22 @@ class PostgresMessageStore:
                 .scalars()
                 .all()
             )
-            if versions and versions != [1]:
+            if versions and versions not in ([1], [2]):
                 raise Conflict("Unsupported message-store schema version")
             if not versions:
-                await conn.execute(text(f'INSERT INTO "{self.database.schema}".schema_version VALUES(1)'))
+                await conn.execute(text(f'INSERT INTO "{self.database.schema}".schema_version VALUES(2)'))
             await conn.run_sync(self.metadata.create_all)
+            if versions == [1]:
+                # JSONB normalizes exponent-form floats and negative zero, which
+                # changes replay fingerprints and publication wire identities.
+                for table in ("states", "outbox"):
+                    await conn.execute(
+                        text(
+                            f'ALTER TABLE "{self.database.schema}".{table} '
+                            "ALTER COLUMN document TYPE JSON USING document::json"
+                        )
+                    )
+                await conn.execute(text(f'UPDATE "{self.database.schema}".schema_version SET version=2'))
 
     async def apply(self, key: str, message: Message, update: Update) -> bool:
         from sqlalchemy import insert, select, update as sql_update
@@ -87,9 +98,17 @@ class PostgresMessageStore:
             await conn.execute(insert(self.inbox).values(key=key, id=message.id, digest=digest))
             for item in outgoing:
                 item.message.to_bytes()
-                await conn.execute(
-                    insert(self.outbox).values(id=item.message.id, document=item.document(), lease_until=0)
+                publication = pg_insert(self.outbox).values(id=item.message.id, document=item.document(), lease_until=0)
+                inserted = await conn.execute(
+                    publication.on_conflict_do_update(
+                        index_elements=[self.outbox.c.id],
+                        set_={"document": self.outbox.c.document},
+                    ).returning(self.outbox.c.document)
                 )
+                # Compare wire fingerprints, not numeric JSON equality.
+                # Lock the existing row without changing its document or lease.
+                if fingerprint(inserted.scalar_one()) != fingerprint(item.document()):
+                    raise Conflict("Outgoing identity conflict")
             return True
 
     async def read(self, key: str) -> dict[str, Any]:

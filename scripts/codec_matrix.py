@@ -29,6 +29,7 @@ def main():
                     f"pydantic=={version}",
                     "pytest>=8,<10",
                     "pytest-asyncio>=0.24,<2",
+                    "pytest-timeout>=2.4,<3",
                 ],
                 check=True,
                 timeout=180,

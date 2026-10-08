@@ -1,2 +1,7 @@
 recursive-include guide *.md
 recursive-include examples *.py
+include Makefile compose.yaml
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py *.json
+recursive-include docker-compose Dockerfile *.yaml *.md

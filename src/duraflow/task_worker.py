@@ -142,6 +142,14 @@ class TaskWorker(Consumer):
     def journal_key(self, request: dict[str, Any]) -> str:
         return canonical([self.topics.namespace, "task", request["dispatch_id"]])
 
+    def resolve_service(self, descriptor: dict[str, Any]) -> tuple[Any, Any]:
+        if not isinstance(descriptor.get("name"), str) or type(descriptor.get("version")) is not int:
+            raise ProtocolError("Invalid service contract")
+        registered = self.registry.tasks.get(f"{descriptor['name']}:v{descriptor['version']}")
+        if registered is None or registered[0].descriptor() != descriptor:
+            raise ProtocolError("Service contract mismatch")
+        return registered
+
     def result(self, state: dict[str, Any], request: dict[str, Any]) -> Publication:
         state["emitted"] = state.get("emitted", 0) + 1
         event = Message(
@@ -198,8 +206,8 @@ class TaskWorker(Consumer):
             return
         elif message.kind == "complete_task":
             message.require(dispatch_id=str, ref=dict, generation=int, secret=str, correlation_id=str, reply_to=str)
-            ref = message.body["ref"]
-            if delivery.topic != self.topics.task_completion(ref.get("name", "invalid"), ref.get("version", 0)):
+            ref, _ = self.resolve_service(message.body["ref"])
+            if delivery.topic != self.topics.task_completion(ref.name, ref.version):
                 raise ProtocolError("External completion requires its completion topic")
             await self.complete(message)
             return
@@ -231,14 +239,9 @@ class TaskWorker(Consumer):
         )
         if not all(key in request for key in required):
             raise ProtocolError("Incomplete service execution request")
-        ref, function = self.registry.tasks.get(f"{request['ref']['name']}:v{request['ref']['version']}", (None, None))
-        if (
-            ref is None
-            or function is None
-            or ref.descriptor() != request["ref"]
-            or request["namespace"] != self.topics.namespace
-        ):
-            raise ProtocolError("Service contract or namespace mismatch")
+        ref, function = self.resolve_service(request["ref"])
+        if request["namespace"] != self.topics.namespace:
+            raise ProtocolError("Service namespace mismatch")
         if message.kind == "execute_task" and delivery.topic != self.topics.task(ref.name, ref.version):
             raise ProtocolError("Wrong service route")
         value = decode(request["input"], ref.input_type)
@@ -393,7 +396,7 @@ class TaskWorker(Consumer):
 
     async def complete(self, message: Message) -> None:
         body = message.body
-        ref, _ = self.registry.tasks[f"{body['ref']['name']}:v{body['ref']['version']}"]
+        ref, _ = self.resolve_service(body["ref"])
         outcome = {
             "result": encode(decode(body["result"], ref.output_type), ref.output_type)
             if body.get("error") is None

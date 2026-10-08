@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from collections import deque
@@ -163,18 +164,23 @@ class PulsarTransport:
             if key not in self.provisioned:
                 if len(self.provisioned) >= self.max_routes:
                     raise ValueError("Declared subscription limit exceeded")
-                consumer = await self._native(
-                    self.client.subscribe,
-                    topic,
-                    subscription,
-                    consumer_type=self.pulsar.ConsumerType.KeyShared if ordered else self.pulsar.ConsumerType.Shared,
-                    initial_position=self.pulsar.InitialPosition.Earliest,
-                    receiver_queue_size=1,
-                    negative_ack_redelivery_delay_ms=1000,
-                )
-                # Never retain an idle coordinator consumer: it would prefetch
-                # and steal work. Closing returns any prefetched delivery.
-                await self._native(consumer.close)
+
+                def provision() -> None:
+                    consumer = self.client.subscribe(
+                        topic,
+                        subscription,
+                        consumer_type=self.pulsar.ConsumerType.KeyShared
+                        if ordered
+                        else self.pulsar.ConsumerType.Shared,
+                        initial_position=self.pulsar.InitialPosition.Earliest,
+                        receiver_queue_size=1,
+                        negative_ack_redelivery_delay_ms=1000,
+                    )
+                    # Closing belongs to the same native operation. A timed-out
+                    # or cancelled await must not strand a prefetching consumer.
+                    consumer.close()
+
+                await self._native(provision)
                 self.provisioned.add(key)
                 if ordered:
                     self.ordered.add(key)
@@ -216,17 +222,7 @@ class PulsarTransport:
         async with self.lock:
             key = topic, subscription
             if key not in self.consumers:
-                self.consumers[key] = await self._native(
-                    self.client.subscribe,
-                    topic,
-                    subscription,
-                    consumer_type=self.pulsar.ConsumerType.KeyShared
-                    if key in self.ordered
-                    else self.pulsar.ConsumerType.Shared,
-                    initial_position=self.pulsar.InitialPosition.Earliest,
-                    receiver_queue_size=self.queue_size,
-                    negative_ack_redelivery_delay_ms=1000,
-                )
+                self.consumers[key] = await self._subscribe(topic, subscription, ordered=key in self.ordered)
         try:
             message = await self._native(self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
         except self.pulsar.Timeout:
@@ -234,6 +230,40 @@ class PulsarTransport:
         return Delivery(
             topic, subscription, message.data(), message.properties(), message, message.partition_key() or None
         )
+
+    async def _subscribe(self, topic: str, subscription: str, *, ordered: bool) -> Any:
+        # Native calls cannot be cancelled. Explicitly transfer the returned
+        # consumer's ownership, or close it if the awaiting coroutine left.
+        lock = threading.Lock()
+        abandoned, completed = False, None
+
+        def subscribe() -> Any:
+            nonlocal completed
+            consumer = self.client.subscribe(
+                topic,
+                subscription,
+                consumer_type=self.pulsar.ConsumerType.KeyShared if ordered else self.pulsar.ConsumerType.Shared,
+                initial_position=self.pulsar.InitialPosition.Earliest,
+                receiver_queue_size=self.queue_size,
+                negative_ack_redelivery_delay_ms=1000,
+            )
+            with lock:
+                close = abandoned
+                if not close:
+                    completed = consumer
+            if close:
+                consumer.close()
+            return consumer
+
+        try:
+            return await self._native(subscribe)
+        except BaseException:
+            with lock:
+                abandoned = True
+                consumer = completed
+            if consumer is not None:
+                await self._native(consumer.close)
+            raise
 
     async def ack(self, delivery: Delivery) -> None:
         await self._native(self.consumers[delivery.topic, delivery.subscription].acknowledge, delivery.receipt)

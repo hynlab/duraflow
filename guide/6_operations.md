@@ -192,5 +192,20 @@ their former pre-wait buffering semantics.
 4. Route new starts to the message-driven client and `df2-` topics.
 5. Retain earlier journals until their delivery and retention obligations expire.
 
-Running histories are not silently converted. The journal schema version is 1;
-the **execution/message protocol is 2**. These are independent version numbers.
+Running protocol-1 histories are not silently converted. The **execution/message
+protocol is 2**. SQLite message-journal schema version is 1; PostgreSQL message-journal
+schema version is 2. These are independent version numbers.
+
+### PostgreSQL message-journal schema 2
+
+Stop DB-backed roles and run the normal journal initialization for each workflow,
+task, and tag schema before restarting them with the updated package. Initialization
+upgrades schema 1 transactionally under an advisory lock; concurrent initializers
+serialize and a failed upgrade rolls back.
+
+Schema 2 uses `JSON` instead of `JSONB` for state/outbox documents. JSONB normalizes
+values such as `1e20` and `-0.0`, which can change replay fingerprints and publication
+identities. JSON retains the representation required by the wire codec. Existing
+documents, inbox identities, outbox owners, and leases are preserved during upgrade;
+numeric representations already normalized by an older journal cannot be recovered
+from that journal alone. Unknown/newer schema versions are rejected.
