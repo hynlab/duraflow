@@ -11,15 +11,22 @@ import pytest
 from scripts.pytest_guard import cleanup, record_resource, terminate_group
 
 
-def test_guard_reaps_registered_replay_process_after_hard_exit(tmp_path):
+@pytest.mark.parametrize("long_executable", [False, True])
+def test_guard_reaps_registered_replay_process_after_hard_exit(tmp_path, long_executable):
     test = tmp_path / "test_abrupt.py"
     pid_file = tmp_path / "child.pid"
+    executable = sys.executable
+    if long_executable:
+        directory = tmp_path / ("long-interpreter-path-" + "x" * 100)
+        directory.symlink_to(sys.prefix, target_is_directory=True)
+        interpreter = directory / "bin" / os.path.basename(sys.executable)
+        executable = str(interpreter)
     test.write_text(
         "import os, signal, subprocess, sys\n"
         "from pathlib import Path\n"
         "from scripts.pytest_guard import record_resource\n"
         "def test_exit():\n"
-        "    child = subprocess.Popen([sys.executable, '-m', 'duraflow.replay_child', '--app', 'tests.message_app', '--max-bytes', '16777216'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)\n"
+        f"    child = subprocess.Popen([{executable!r}, '-m', 'duraflow.replay_child', '--app', 'tests.message_app', '--max-bytes', '16777216'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)\n"
         "    assert child.stdout.readline()\n"
         "    os.killpg(child.pid, signal.SIGSTOP)\n"
         "    record_resource('process', pid=child.pid)\n"

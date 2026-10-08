@@ -27,7 +27,7 @@ def record_resource(kind, *, released=False, **fields):
 def terminate_group(group, run_id, sig=signal.SIGKILL):
     """Signal only members carrying this invocation's identity; fail closed."""
     listing = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,stat=,command="], check=True, capture_output=True, text=True, timeout=10
+        ["ps", "-axo", "pid=,pgid=,stat=,command=", "-ww"], check=True, capture_output=True, text=True, timeout=10
     ).stdout
     members = []
     for line in listing.splitlines():
