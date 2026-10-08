@@ -7,12 +7,12 @@
 From a checkout with Python 3.12+ activated:
 
 ```bash
-python -m pip install -e '.[dev,postgres,pulsar]'
+python -m pip install -e '.[dev]'
 make check
 ```
 
 `make check` runs formatter checks, Ruff, mypy, and non-integration tests. CI also
-tests a minimal `.[dev]` installation. Choose an interpreter with
+tests the base dependencies plus `.[dev]` tools. Choose an interpreter with
 `make check PYTHON=/path/to/python`.
 
 | Command | Purpose |
@@ -87,6 +87,10 @@ package-index access for their temporary environments.
 
 ### Protocol-2 verification
 
+- `tests/test_runtime_configuration.py`: code/environment precedence, secret-file
+  selection, connection cleanup, SQLite journal contention, and public runtime recovery.
+- `tests/test_native_runtime_configuration.py`: code and environment configuration
+  against SQLite/Pulsar and PostgreSQL/Pulsar, with engine reconnection.
 - `tests/test_message_runtime.py`: reception registration, filters, repeated
   signals, timeouts, tags, duplicate/stale events, outbox atomicity, and lifecycle.
 - `tests/test_native_messages.py`: independent Pulsar clients and PostgreSQL

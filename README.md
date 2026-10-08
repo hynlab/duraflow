@@ -1,6 +1,6 @@
 # Duraflow
 
-**Message-driven durable workflows for Python, PostgreSQL, and Apache Pulsar.**
+**Message-driven durable workflows for Python, SQLite/PostgreSQL, and Apache Pulsar.**
 
 [![CI](https://github.com/hynlab/duraflow/actions/workflows/ci.yml/badge.svg)](https://github.com/hynlab/duraflow/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
@@ -28,8 +28,7 @@ and long-running business processes.
 - **Operational tools:** CLI inspection and controls, readiness probes, structured
   logs, Prometheus metrics, and explicit history retention.
 
-Duraflow is **alpha**. These guides describe the current source checkout, which
-uses execution protocol 2. See the [upgrade section](guide/6_operations.md#upgrading-from-protocol-1)
+Duraflow **1.0** uses execution protocol 2. See the [upgrade section](guide/6_operations.md#upgrading-from-protocol-1)
 when working with earlier alpha executions.
 
 ## Installation
@@ -37,18 +36,12 @@ when working with earlier alpha executions.
 Requires **Python 3.12+**.
 
 ```bash
-git clone https://github.com/hynlab/duraflow.git
-cd duraflow
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+pip install duraflow
 ```
 
-For distributed services:
-
-```bash
-python -m pip install -e '.[postgres,pulsar]'
-```
+Includes the PostgreSQL driver, SQLAlchemy, and Pulsar client. SQLite uses Python's
+built-in `sqlite3`. No adapter extras are needed; the old `[postgres,pulsar]` extras
+remain compatible aliases. PostgreSQL and Pulsar servers are configured separately.
 
 ## Quick start
 
@@ -77,8 +70,11 @@ async def example(ctx: WorkflowContext, value: int) -> int:
     return first + second
 
 
+registry = Registry(example, double)
+
+
 async def main() -> None:
-    async with TestEnvironment(Registry(example, double)) as env:
+    async with TestEnvironment(registry) as env:
         handle = await env.client.start(example, 5, request_id="demo-1")
         print(await env.run(handle))  # 22
 
@@ -98,6 +94,164 @@ python examples/quickstart.py       # 22
 python examples/broadcast_join.py  # publication receipt and payload 27
 python -m examples.signals         # approval through a channel; result 14
 ```
+
+The included examples require a [source checkout](guide/1_getting_started.md).
+
+## Complete Docker Compose example
+
+The [`docker-compose/`](docker-compose/README.md) folder includes PostgreSQL,
+Apache Pulsar, and the three Duraflow execution services. DB/Pulsar environment
+variables and container networking are preconfigured; no manual setup is needed.
+From a source checkout:
+
+```bash
+docker compose -f docker-compose/compose.yaml up --build -d --wait --wait-timeout 300
+docker compose -f docker-compose/compose.yaml run --rm client  # prints 22
+docker compose -f docker-compose/compose.yaml down            # keeps journal/broker volumes
+```
+
+The image installs the package with its base dependencies. The on-demand client
+executes a real message-driven workflow through Pulsar and PostgreSQL. See the
+[Compose guide](docker-compose/README.md) for settings, restart tests, and cleanup.
+
+## Connect DB and Pulsar
+
+Use Python settings or environment variables. Both use the same runtime and
+connection factories. Save the quick-start application above as `my_app.py` so
+workers can import its `registry`.
+
+### Configure in Python
+
+Save this as `run_engine.py`:
+
+```python
+import asyncio
+from duraflow import Runtime, RuntimeSettings
+
+settings = RuntimeSettings(
+    database_url="sqlite:///duraflow.db",
+    task_journal_url="sqlite:///duraflow-tasks.db",
+    broker_url="pulsar://localhost:6650",
+    namespace="demo",
+)
+# PostgreSQL instead: database_url="postgresql+psycopg://user:password@localhost:5432/duraflow"
+# Set task_journal_url to the task journal's PostgreSQL URL too.
+
+
+async def main() -> None:
+    runtime = Runtime(role="workflow-engine", settings=settings, app="my_app")
+    await runtime.initialize()  # Prepare/check this role's journal; no broker connection.
+    async with runtime:
+        await runtime.run()  # Or run(stop=your_asyncio_event).
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run `python run_engine.py`. Run separate processes with the same settings and
+`role="workflow-worker"` and `role="task-worker"` to execute workflows and tasks.
+Workflow workers use the importable `app` module in replay subprocesses. Tag
+features additionally use `tag-engine` and `task-tag-engine` roles.
+
+For a broker-only client, inside an async function:
+
+```python
+from my_app import example, registry
+
+async with Runtime(role="client", settings=settings, registry=registry) as runtime:
+    handle = await runtime.client.start(example, 5, request_id="demo-1")
+    print(await handle.result(timeout=30))  # 22, with the three services running
+```
+
+`Runtime` owns and closes its connections. Construction does not connect; entering
+the context prepares subscriptions. Initialize journals before starting services.
+Client and workflow-worker roles never open the workflow DB. Python callers own
+their signal handling; cancelling `run()` or setting its stop event shuts it down.
+
+### Configure with environment variables
+
+In each service terminal, set these variables (bash/zsh):
+
+```bash
+# SQLite: files are relative to each process's working directory.
+export DURAFLOW_DATABASE_URL='sqlite:///duraflow.db'
+export DURAFLOW_TASK_JOURNAL_URL='sqlite:///duraflow-tasks.db'
+export DURAFLOW_PULSAR_URL='pulsar://localhost:6650'
+export DURAFLOW_NAMESPACE='demo'
+
+# Optional routing/schema settings; these are the defaults.
+export DURAFLOW_PULSAR_TENANT='public'
+export DURAFLOW_PULSAR_NAMESPACE='default'
+export DURAFLOW_MESSAGE_SCHEMA='duraflow_messages'
+```
+
+For PostgreSQL, replace the two DB variables:
+
+```bash
+export DURAFLOW_DATABASE_URL='postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow'
+export DURAFLOW_TASK_JOURNAL_URL="$DURAFLOW_DATABASE_URL"
+```
+
+The same PostgreSQL server may host both journals: task workers use the separate
+`duraflow_messages_tasks` schema by default. SQLite ignores schemas; use separate
+files. For an absolute SQLite path use `sqlite:////absolute/path/duraflow.db`.
+
+Initialize once, then run each service in its own terminal:
+
+```bash
+python -m duraflow init
+python -m duraflow --database "$DURAFLOW_TASK_JOURNAL_URL" --schema duraflow_messages_tasks init
+
+python -m duraflow --app my_app workflow-engine
+python -m duraflow --app my_app workflow-worker
+python -m duraflow --app my_app task-worker
+```
+
+With the services running, submit the example from another configured terminal:
+
+```bash
+python -m duraflow --app my_app start example:v1 --input 5 --request-id demo-1
+python -m duraflow --app my_app result demo-1 --timeout 30
+```
+
+Python can read the same variables explicitly:
+
+```python
+settings = RuntimeSettings.from_environment(role="workflow-engine")
+# Explicit arguments override environment values:
+settings = RuntimeSettings.from_environment(role="workflow-engine", namespace="another-app")
+```
+
+Direct `RuntimeSettings(...)` construction does **not** read environment variables.
+Environment loading uses **explicit overrides > environment > defaults**; CLI
+options override environment values. The optional `role` argument skips unrelated
+DB secrets. `DURAFLOW_DATABASE_URL_FILE`, `DURAFLOW_TASK_JOURNAL_URL_FILE`, and
+`DURAFLOW_PULSAR_TOKEN_FILE` support secret files. TLS settings and the full
+configuration table are in [operations](guide/6_operations.md).
+
+### Why do the distributed guides use PostgreSQL?
+
+**SQLite is supported**, including durable state, task journals, and restart
+recovery. PostgreSQL is the recommended distributed backend:
+
+| Backend | Intended use and behavior |
+| --- | --- |
+| SQLite | Local/single-host execution; WAL and `BEGIN IMMEDIATE`; one writer at a time |
+| PostgreSQL | Distributed services and concurrent writers; row locks, `SKIP LOCKED`, and DB-server time |
+
+The existing PostgreSQL adapter uses **SQLAlchemy Core**, PostgreSQL `JSONB`,
+schemas, and advisory locks. SQLAlchemy supports many databases, but cannot make
+their locking, clock, and transaction semantics identical. Other SQLAlchemy
+dialects require an adapter and recovery tests; changing the URL alone is not
+enough. The SQLite adapter uses `sqlite3` directly behind the same `MessageStore`
+interface.
+
+The explicit `production=True` / `DURAFLOW_PRODUCTION=true` policy currently
+requires verified PostgreSQL TLS for DB-backed roles and authenticated Pulsar TLS.
+SQLite works with the default `production=False`; that policy restriction is
+separate from SQLite storage support. See [distributed services](guide/5_distributed.md)
+for infrastructure setup and independent role deployment.
 
 ## Signal channels
 
@@ -185,7 +339,7 @@ Bug reports, documentation improvements, and pull requests are welcome.
 Include a reproducible case when [reporting an issue](https://github.com/hynlab/duraflow/issues).
 
 ```bash
-python -m pip install -e '.[dev,postgres,pulsar]'
+python -m pip install -e '.[dev]'
 make check
 ```
 

@@ -5,10 +5,14 @@
 Run commands from the repository root with your Python environment activated.
 This example uses PostgreSQL 16, Pulsar 4.0.3, and the approval application.
 
+For an all-container demo with connections already configured, use the separate
+[`docker-compose/` example](../docker-compose/README.md). The steps below use
+the root infrastructure-only Compose file and Python processes on your host.
+
 ## 1. Install adapters and start infrastructure
 
 ```bash
-python -m pip install -e '.[postgres,pulsar]'
+python -m pip install duraflow
 docker compose up -d --wait --wait-timeout 240
 ```
 
@@ -25,6 +29,9 @@ docker compose up -d --wait --wait-timeout 240
 
 Use unused ports. Containerized application workers need an advertised broker
 address reachable from their own network.
+
+The `examples` modules and Compose file come from the source checkout. When
+developing the package itself, use `python -m pip install -e .` instead.
 
 ## 2. Configure and initialize journals
 
@@ -44,6 +51,21 @@ server is convenient, but each role can use a different database and principal.
 
 Export the applicable variables in each terminal. If using alternative ports,
 copy the resolved URLs or export the same port variables there as well.
+
+### SQLite instead of PostgreSQL
+
+For single-host services, replace the database variables before initialization:
+
+```bash
+export DURAFLOW_DATABASE_URL='sqlite:////absolute/path/duraflow.db'
+export DURAFLOW_TASK_JOURNAL_URL='sqlite:////absolute/path/duraflow-tasks.db'
+```
+
+Choose existing parent directories. SQLite creates the files and tables; schemas
+do not separate SQLite journals, so use different files. Pulsar is still required
+for these services. SQLite supports restart recovery but serializes writers;
+PostgreSQL is recommended for multi-host deployments. The strict production mode
+requires PostgreSQL. See the [backend explanation](../README.md#why-do-the-distributed-guides-use-postgresql).
 
 ## 3. Start independent roles
 
@@ -113,6 +135,34 @@ docker compose down
 
 This keeps volumes. `docker compose down -v` deletes them. Keep the same Compose
 project and port configuration when restarting the environment.
+
+## Python-managed services
+
+The public `Runtime` creates the same services as the CLI. Its settings may be
+constructed directly or loaded with `RuntimeSettings.from_environment(role=...)`.
+The checkout includes a runnable example using SQLite and Pulsar by default:
+
+```bash
+# Three terminals, from the checkout root:
+python -m examples.runtime workflow-engine --initialize
+python -m examples.runtime workflow-worker
+python -m examples.runtime task-worker --initialize
+
+# Fourth terminal: prints 22.
+python -m examples.runtime client
+```
+
+Add `--from-environment` to **each** command to use the exported DB/Pulsar settings
+instead of the example's code settings. `--initialize` calls `Runtime.initialize()`
+before connecting to the broker. It prepares only the selected role's journal;
+PostgreSQL deployments must initialize each journal before its service starts.
+
+Use `Runtime(role="client", ...)` and its `client` property for request/response
+operations. Service roles use `await runtime.run(stop=event)` inside `async with`.
+On exit, the runtime closes its own connections. Await or cancel the running
+service before leaving its context. `Runtime` does not install signal handlers;
+the example explicitly maps Ctrl-C and SIGTERM to its stop event on POSIX. For subprocess replay,
+the workflow-worker role requires an importable `app` exporting `registry`.
 
 ## Troubleshooting
 

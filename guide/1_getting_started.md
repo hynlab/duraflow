@@ -2,9 +2,16 @@
 
 [Index](0_index.md) · Next: [Writing workflows](2_workflows.md)
 
-## Install the current source
+## Install
 
 Use Python 3.12 or newer. CI also exercises Python 3.13.
+
+```bash
+pip install duraflow
+```
+
+SQLite, PostgreSQL, and Pulsar support are included. To run the repository examples
+or contribute, install from a checkout instead:
 
 ```bash
 git clone https://github.com/hynlab/duraflow.git
@@ -17,13 +24,9 @@ python -m pip install -e .
 PowerShell activation is `.venv\Scripts\Activate.ps1`. Distributed process and
 SIGKILL tests use POSIX process facilities; use Linux or WSL for those tests.
 
-| Extras | Installation |
-| --- | --- |
-| PostgreSQL | `python -m pip install -e '.[postgres]'` |
-| Pulsar | `python -m pip install -e '.[pulsar]'` |
-| Development and both adapters | `python -m pip install -e '.[dev,postgres,pulsar]'` |
-
-The Pulsar adapter needs a compatible `pulsar-client` wheel for your platform.
+Development tools use `python -m pip install -e '.[dev]'`. The old `[postgres]`
+and `[pulsar]` extras remain compatibility aliases; drivers are base dependencies.
+The installation needs a compatible `pulsar-client` wheel for your platform.
 
 ## Run the examples
 
@@ -100,6 +103,9 @@ cancel the workflow. `describe()` and `history()` are request/response operation
 | `TestEnvironment` | Local examples and deterministic tests |
 | `SQLiteMessageStore` | File-backed local state or task journals |
 | `PostgresMessageStore` + `PulsarTransport` | Independent distributed processes |
+| `Runtime` + `RuntimeSettings` | Managed role connections using code or environment settings |
 
 Memory state disappears when its process exits. Continue with
-[distributed services](5_distributed.md) for persistent workflows.
+[distributed services](5_distributed.md) for persistent workflows. See the
+[README connection examples](../README.md#connect-db-and-pulsar) for exact
+environment variables, Python configuration, and SQLite/PostgreSQL tradeoffs.

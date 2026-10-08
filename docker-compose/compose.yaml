@@ -1,0 +1,93 @@
+name: duraflow-demo
+
+x-runtime: &runtime
+  build:
+    context: ..
+    dockerfile: docker-compose/Dockerfile
+  image: duraflow-demo:local
+  environment: &settings
+    DURAFLOW_DATABASE_URL: "postgresql+psycopg://duraflow:development-only@postgres:5432/duraflow"
+    DURAFLOW_TASK_JOURNAL_URL: "postgresql+psycopg://duraflow:development-only@postgres:5432/duraflow"
+    DURAFLOW_PULSAR_URL: "pulsar://pulsar:6650"
+    DURAFLOW_NAMESPACE: "${DURAFLOW_DEMO_NAMESPACE:-compose-demo}"
+    DURAFLOW_PULSAR_TENANT: public
+    DURAFLOW_PULSAR_NAMESPACE: default
+    DURAFLOW_MESSAGE_SCHEMA: duraflow_messages
+    DURAFLOW_PROBE_HOST: 0.0.0.0
+    DURAFLOW_PROBE_PORT: "8090"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    pulsar:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/ready', timeout=3)"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 15s
+  stop_grace_period: 40s
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: duraflow
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: duraflow
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U duraflow -d duraflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  pulsar:
+    image: apachepulsar/pulsar:4.0.3
+    command: ["bin/pulsar", "standalone", "--advertised-address", "pulsar", "--no-functions-worker", "--no-stream-storage"]
+    environment:
+      PULSAR_MEM: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m"
+    volumes: ["pulsar-data:/pulsar/data"]
+    healthcheck:
+      test: ["CMD", "bin/pulsar-admin", "brokers", "healthcheck"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+
+  workflow-engine:
+    <<: *runtime
+    command: ["python", "-m", "examples.runtime", "workflow-engine", "--from-environment", "--initialize"]
+
+  workflow-worker:
+    <<: *runtime
+    environment:
+      <<: *settings
+      DURAFLOW_DATABASE_URL: ""
+      DURAFLOW_TASK_JOURNAL_URL: ""
+    command: ["python", "-m", "examples.runtime", "workflow-worker", "--from-environment"]
+
+  task-worker:
+    <<: *runtime
+    command: ["python", "-m", "examples.runtime", "task-worker", "--from-environment", "--initialize"]
+
+  client:
+    <<: *runtime
+    profiles: ["test"]
+    environment:
+      <<: *settings
+      DURAFLOW_DATABASE_URL: ""
+      DURAFLOW_TASK_JOURNAL_URL: ""
+    command: ["python", "-m", "examples.runtime", "client", "--from-environment"]
+    healthcheck:
+      disable: true
+    depends_on:
+      workflow-engine:
+        condition: service_healthy
+      workflow-worker:
+        condition: service_healthy
+      task-worker:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  pulsar-data:
