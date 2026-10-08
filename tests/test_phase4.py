@@ -70,6 +70,31 @@ def test_verified_production_policy_and_redacted_representation(certificate):
         validate_production_connections(url, settings.broker_url, "token", str(certificate) + "-missing")
 
 
+async def test_production_runtime_validates_only_the_selected_journal(certificate, monkeypatch):
+    from dataclasses import replace
+    from duraflow import MemoryBroker, Runtime
+    from tests.message_app import registry
+
+    settings = RuntimeSettings(
+        production=True,
+        broker_url="pulsar+ssl://broker:6651",
+        pulsar_token="private-token",
+        pulsar_tls_ca=str(certificate),
+    )
+    transport = MemoryBroker()
+    monkeypatch.setattr("duraflow.runtime.broker", lambda settings: transport)
+    async with Runtime(role="client", settings=settings) as runtime:
+        assert runtime.store is None
+    with pytest.raises(ValueError, match="PostgreSQL"):
+        await Runtime(role="workflow-engine", settings=settings, registry=registry).initialize()
+    with pytest.raises(ValueError, match="independent journal"):
+        Runtime(role="task-worker", settings=settings, registry=registry)
+    with pytest.raises(ValueError, match="PostgreSQL"):
+        await Runtime(
+            role="task-worker", settings=replace(settings, task_journal_url="sqlite:///tasks.db"), registry=registry
+        ).initialize()
+
+
 def test_secret_source_bounds_permissions_and_no_implicit_fallback(tmp_path):
     secret = tmp_path / "token"
     secret.write_text("correct-token\n")

@@ -27,6 +27,7 @@ async def supervise(
     *,
     role: str,
     on_hard_timeout: Callable[[], None] | None = None,
+    close_resources: bool = True,
 ) -> None:
     health = HealthState()
     runtime.health = health
@@ -90,11 +91,9 @@ async def supervise(
         monitor_task.cancel()
         if not running.done():
             running.cancel()
-        cleanup = [
-            asyncio.create_task(runtime.close()),
-            asyncio.create_task(transport.close()),
-            asyncio.create_task(probes.close()),
-        ]
+        cleanup = [asyncio.create_task(probes.close())]
+        if close_resources:
+            cleanup.extend([asyncio.create_task(runtime.close()), asyncio.create_task(transport.close())])
         all_tasks = {running, requested, monitor_task, *cleanup}
         done, pending = await asyncio.wait(all_tasks, timeout=min(settings.shutdown_timeout, 5))
         for task in done:

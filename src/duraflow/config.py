@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+import os
 from typing import Any, Mapping
 
 from .contracts import duration, name
-from .security import secret_value, validate_production_connections
+from .security import secret_value, validate_production_broker
 from .retention import RetentionPolicy
+
+RUNTIME_ROLES = frozenset(
+    {"client", "workflow-engine", "workflow-worker", "task-worker", "tag-engine", "task-tag-engine"}
+)
 
 
 @dataclass(frozen=True)
 class RuntimeSettings:
     database_url: str = field(default="sqlite:///duraflow.db", repr=False)
+    task_journal_url: str | None = field(default=None, repr=False)
+    message_schema: str = "duraflow_messages"
     broker_url: str = field(default="pulsar://localhost:6650", repr=False)
+    pulsar_tenant: str = "public"
+    pulsar_namespace: str = "default"
     namespace: str = "default"
     production: bool = False
     pulsar_token: str | None = field(default=None, repr=False)
@@ -42,6 +51,14 @@ class RuntimeSettings:
 
     def __post_init__(self) -> None:
         name(self.namespace)
+        name(self.pulsar_tenant)
+        name(self.pulsar_namespace)
+        if (
+            not self.message_schema.replace("_", "").isalnum()
+            or not self.message_schema.isascii()
+            or len(self.message_schema) > 63
+        ):
+            raise ValueError("Message schema must be an ASCII SQL identifier of at most 63 characters")
         name(self.operator_role)
         if type(self.production) is not bool or len(self.operator_role) > 63:
             raise ValueError("Invalid production mode or operator role")
@@ -86,13 +103,34 @@ class RuntimeSettings:
         if not self.broker_url.startswith(("pulsar://", "pulsar+ssl://")):
             raise ValueError("Unsupported broker URL scheme")
         if self.production:
-            validate_production_connections(self.database_url, self.broker_url, self.pulsar_token, self.pulsar_tls_ca)
+            # Database policy is checked when opening the role's journal. Broker-only
+            # clients and replay workers must not require workflow DB credentials.
+            validate_production_broker(self.broker_url, self.pulsar_token, self.pulsar_tls_ca)
 
     @classmethod
-    def from_environment(cls, env: Mapping[str, str], **overrides: Any) -> RuntimeSettings:
-        source = dict(env)
-        for key in ("DURAFLOW_DATABASE_URL", "DURAFLOW_PULSAR_TOKEN"):
-            loaded_secret = secret_value(env, key)
+    def from_environment(
+        cls, env: Mapping[str, str] | None = None, *, role: str | None = None, **overrides: Any
+    ) -> RuntimeSettings:
+        """Load explicit overrides > environment > defaults; optionally select a role's secrets."""
+        if role is not None and role not in RUNTIME_ROLES:
+            raise ValueError("Unknown runtime role")
+        source = dict(os.environ if env is None else env)
+        ignored = set()
+        if role in {"client", "workflow-worker", "task-worker"}:
+            ignored.add("database_url")
+        if role is not None and role != "task-worker":
+            ignored.add("task_journal_url")
+        secrets = {
+            "database_url": "DURAFLOW_DATABASE_URL",
+            "task_journal_url": "DURAFLOW_TASK_JOURNAL_URL",
+            "pulsar_token": "DURAFLOW_PULSAR_TOKEN",
+        }
+        for field_name, key in secrets.items():
+            if field_name in ignored or overrides.get(field_name) is not None:
+                source.pop(key, None)
+                source.pop(key + "_FILE", None)
+                continue
+            loaded_secret = secret_value(source, key)
             if loaded_secret is not None:
                 source[key] = loaded_secret
         env = source
@@ -100,6 +138,8 @@ class RuntimeSettings:
         defaults = cls()
         aliases = {"broker_url": "DURAFLOW_PULSAR_URL"}
         for item in fields(cls):
+            if item.name in ignored or overrides.get(item.name) is not None:
+                continue
             key = aliases.get(item.name, "DURAFLOW_" + item.name.upper())
             if key not in env:
                 continue

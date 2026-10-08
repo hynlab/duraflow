@@ -31,17 +31,17 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--database", default=None)
     root.add_argument("--legacy", action="store_true", help="Drain protocol-1 executions using the polling runtime")
     root.add_argument("--workflow", help="Workflow contract name:vN for inspecting a logical workflow ID")
-    root.add_argument("--tenant", default=os.environ.get("DURAFLOW_PULSAR_TENANT", "public"))
-    root.add_argument("--environment", default=os.environ.get("DURAFLOW_PULSAR_NAMESPACE", "default"))
-    root.add_argument("--schema", default=os.environ.get("DURAFLOW_MESSAGE_SCHEMA", "duraflow_messages"))
+    root.add_argument("--tenant", default=None)
+    root.add_argument("--environment", default=None)
+    root.add_argument("--schema", default=None)
     root.add_argument(
         "--journal",
-        default=os.environ.get("DURAFLOW_TASK_JOURNAL_URL"),
+        default=None,
         help="Independent service execution journal URL",
     )
-    root.add_argument("--namespace", default=os.environ.get("DURAFLOW_NAMESPACE", "default"))
+    root.add_argument("--namespace", default=None)
     root.add_argument("--app", help="Trusted module exporting registry, optional broadcasts and signals")
-    root.add_argument("--broker", default=os.environ.get("DURAFLOW_PULSAR_URL", "pulsar://localhost:6650"))
+    root.add_argument("--broker", default=None)
     root.add_argument("--production", action="store_true", default=None)
     root.add_argument("--concurrency", type=int)
     root.add_argument("--lease-seconds", type=float)
@@ -122,6 +122,10 @@ def parser() -> argparse.ArgumentParser:
 
 async def open_store(url: str, settings: RuntimeSettings | None = None) -> Store:
     settings = settings or RuntimeSettings(database_url=url)
+    if settings.production:
+        from .security import validate_production_connections
+
+        validate_production_connections(url, settings.broker_url, settings.pulsar_token, settings.pulsar_tls_ca)
     if url.startswith("sqlite:///"):
         return SQLiteStore(url.removeprefix("sqlite:///"))
     from .postgres import PostgresStore
@@ -231,7 +235,7 @@ async def execute(args: argparse.Namespace) -> Any:
     registry = getattr(app, "registry", Registry())
     settings = runtime_settings(args)
     store = await open_store(settings.database_url, settings)
-    client = Client(store, registry, namespace=args.namespace)
+    client = Client(store, registry, namespace=settings.namespace)
     try:
         if args.command in {"init", "migrate"}:
             initialize = getattr(store, "initialize", None)
@@ -240,8 +244,8 @@ async def execute(args: argparse.Namespace) -> Any:
             version = getattr(store, "schema_version", None)
             return {"schema_version": await version() if version is not None else 1, "initialized": True}
         if args.command == "health":
-            await store.scan(args.namespace, limit=1)
-            return {"store_readable": True, "namespace": args.namespace}
+            await store.scan(settings.namespace, limit=1)
+            return {"store_readable": True, "namespace": settings.namespace}
         if args.command in {"engine", "worker"}:
             return await service(args, store, app, registry)
         if args.command == "list":
@@ -336,13 +340,20 @@ def main() -> None:
         raise SystemExit(2) from None
 
 
-def runtime_settings(args: argparse.Namespace, *, environment: Any = None) -> RuntimeSettings:
+def runtime_settings(args: argparse.Namespace, *, environment: Any = None, role: str | None = None) -> RuntimeSettings:
     overrides = {"database_url": args.database, "broker_url": args.broker, "namespace": args.namespace}
+    for option, field in (
+        ("journal", "task_journal_url"),
+        ("schema", "message_schema"),
+        ("tenant", "pulsar_tenant"),
+        ("environment", "pulsar_namespace"),
+    ):
+        overrides[field] = getattr(args, option, None)
     for field in ("production", "concurrency", "lease_seconds", "shutdown_timeout", "probe_port", "probe_host"):
         value = getattr(args, field, None)
         if value is not None:
             overrides[field] = value
-    return RuntimeSettings.from_environment(os.environ if environment is None else environment, **overrides)
+    return RuntimeSettings.from_environment(environment, role=role, **overrides)
 
 
 if __name__ == "__main__":

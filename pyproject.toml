@@ -4,19 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duraflow"
-version = "0.1.0a1"
-description = "Independent Python durable workflow engine with replay, Pulsar and PostgreSQL"
+version = "1.0.0"
+description = "Independent Python durable workflow engine with replay, Pulsar, PostgreSQL and SQLite"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "Duraflow contributors"}]
-dependencies = ["pydantic>=2.13.4,<2.14"]
-classifiers = ["Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Typing :: Typed"]
+dependencies = [
+    "pydantic>=2.13.4,<2.14",
+    "SQLAlchemy[asyncio]>=2.0.36,<2.1",
+    "psycopg[binary]>=3.2,<4",
+    "pulsar-client>=3.6,<4",
+]
+classifiers = ["Programming Language :: Python :: 3", "Typing :: Typed"]
 
 [project.optional-dependencies]
-postgres = ["SQLAlchemy[asyncio]>=2.0.36,<2.1", "psycopg[binary]>=3.2,<4"]
-pulsar = ["pulsar-client>=3.6,<4"]
+# Compatibility aliases: adapters are included in the base installation.
+postgres = []
+pulsar = []
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "pytest-cov>=7,<8", "coverage[toml]>=7.10.6,<8", "hypothesis>=6,<7", "ruff>=0.11,<1", "mypy>=1.15,<2", "build>=1.2,<2"]
 
 [project.scripts]

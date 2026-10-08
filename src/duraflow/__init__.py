@@ -44,8 +44,10 @@ from .runner import Worker as LegacyWorker
 from .task_worker import TaskContext
 from .storage import MemoryStore, SQLiteStore, Store
 from .transport import MemoryTransport, PulsarTransport, Transport
+from .config import RuntimeSettings
+from .runtime import Runtime
 
-__version__ = "0.1.0a1"
+__version__ = "1.0.0"
 __all__ = [
     "Archived",
     "BroadcastBinding",
@@ -75,6 +77,8 @@ __all__ = [
     "RaceResult",
     "Registry",
     "RetryPolicy",
+    "Runtime",
+    "RuntimeSettings",
     "SQLiteStore",
     "SQLiteMessageStore",
     "SignalFilter",
