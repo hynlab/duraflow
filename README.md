@@ -240,8 +240,9 @@ recovery. PostgreSQL is the recommended distributed backend:
 | SQLite | Local/single-host execution; WAL and `BEGIN IMMEDIATE`; one writer at a time |
 | PostgreSQL | Distributed services and concurrent writers; row locks, `SKIP LOCKED`, and DB-server time |
 
-The existing PostgreSQL adapter uses **SQLAlchemy Core**, PostgreSQL `JSONB`,
-schemas, and advisory locks. SQLAlchemy supports many databases, but cannot make
+The PostgreSQL adapter uses **SQLAlchemy Core**, schemas, and advisory locks.
+Message journals use PostgreSQL `JSON` to preserve exact JSON numeric representations;
+legacy journals use `JSONB`. SQLAlchemy supports many databases, but cannot make
 their locking, clock, and transaction semantics identical. Other SQLAlchemy
 dialects require an adapter and recovery tests; changing the URL alone is not
 enough. The SQLite adapter uses `sqlite3` directly behind the same `MessageStore`

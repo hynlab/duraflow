@@ -46,15 +46,21 @@ class MemoryMessageStore:
                 return False
             state = clone(self.documents.get(key, {}))
             outgoing = update(state, self.clock.now())
+            pending: dict[str, dict[str, Any]] = {}
             for item in outgoing:
                 item.message.to_bytes()
+                document = clone(item.document())
                 previous_item = self.outbox.get(item.message.id)
-                if previous_item is not None and previous_item["publication"] != item.document():
+                previous_document = pending.get(item.message.id)
+                if previous_item is not None:
+                    previous_document = previous_item["publication"]
+                if previous_document is not None and canonical(previous_document) != canonical(document):
                     raise Conflict("Outgoing identity conflict")
+                pending[item.message.id] = document
             self.documents[key] = clone(state)
             self.inbox[key, message.id] = digest
-            for item in outgoing:
-                self.outbox.setdefault(item.message.id, {"publication": item.document(), "owner": None, "until": 0})
+            for message_id, document in pending.items():
+                self.outbox.setdefault(message_id, {"publication": document, "owner": None, "until": 0})
             return True
 
     async def read(self, key: str) -> dict[str, Any]:
@@ -143,10 +149,14 @@ class SQLiteMessageStore:
                     conn.execute("INSERT INTO message_inbox VALUES(?,?,?)", (key, message.id, digest))
                     for item in outgoing:
                         item.message.to_bytes()
-                        conn.execute(
-                            "INSERT INTO message_outbox(id,document) VALUES(?,?)",
+                        inserted = conn.execute(
+                            "INSERT INTO message_outbox(id,document) VALUES(?,?) "
+                            "ON CONFLICT(id) DO UPDATE SET document=excluded.document "
+                            "WHERE message_outbox.document=excluded.document RETURNING id",
                             (item.message.id, canonical(item.document())),
-                        )
+                        ).fetchone()
+                        if inserted is None:
+                            raise Conflict("Outgoing identity conflict")
                     return True
             finally:
                 conn.close()
