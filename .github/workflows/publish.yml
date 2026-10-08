@@ -24,7 +24,7 @@ jobs:
   build:
     if: github.repository == 'hynlab/duraflow' && (github.event_name == 'release' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     outputs:
       version: ${{ steps.metadata.outputs.version }}
     env:

@@ -1,6 +1,6 @@
 # Publishing Duraflow to PyPI
 
-Duraflow is distributed under Apache-2.0. Version 1.0.0 uses execution protocol 2;
+Duraflow is distributed under Apache-2.0. Version 1.0.1 uses execution protocol 2;
 see the [upgrade guide](../guide/6_operations.md#upgrading-from-protocol-1) when
 moving from the earlier alpha's protocol-1 histories.
 
@@ -80,7 +80,7 @@ reuse its filenames. Do not re-run a successfully published version blindly.
 ```bash
 pip install duraflow
 # Or pin the release:
-pip install 'duraflow==1.0.0'
+pip install 'duraflow==1.0.1'
 ```
 
 Python 3.12 or newer is required. These commands are valid only after the
