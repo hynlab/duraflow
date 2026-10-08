@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from duraflow import Client
+from duraflow import LegacyClient as Client
 from duraflow.contracts import Conflict
 from tests.native_coordination_app import BUFFERED, GO, registry, rollover, waiter
 

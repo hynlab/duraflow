@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from duraflow import Client
+from duraflow import LegacyClient as Client
 from duraflow.postgres import PostgresStore
 from duraflow.transport import PulsarTransport
 from scripts.fault_guard import owned_service, project_name

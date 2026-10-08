@@ -10,7 +10,7 @@ from duraflow import (
     Archived,
     BroadcastBinding,
     Conflict,
-    Engine,
+    LegacyEngine as Engine,
     HandlerRef,
     MemoryStore,
     NonDeterminism,
@@ -32,7 +32,7 @@ from duraflow import (
 from duraflow.contracts import ProtocolError, canonical, decode, encode, fingerprint, parse_json
 from duraflow.replay import replay
 from duraflow.state import subscription
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 
 DOUBLE = TaskRef("double", int, int)
 APPROVAL = SignalRef("approval", bool)

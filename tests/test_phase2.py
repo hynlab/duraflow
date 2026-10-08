@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from duraflow import Client, Engine, Registry, Worker
+from duraflow import LegacyClient as Client, LegacyEngine as Engine, Registry, LegacyWorker as Worker
 from duraflow.contracts import Clock, Conflict, clock_now
 from duraflow.postgres import PostgresStore
 from duraflow.projection import next_due

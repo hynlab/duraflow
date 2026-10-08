@@ -230,7 +230,25 @@ class TaskRef(Generic[InputT, OutputT]):
 
 @dataclass(frozen=True)
 class WorkflowRef(TaskRef[InputT, OutputT]):
-    pass
+    build_id: str | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.build_id is not None and (
+            not isinstance(self.build_id, str) or not self.build_id or len(self.build_id) > 256
+        ):
+            raise ValueError("build_id must be a nonempty string of at most 256 characters")
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        if not self.build_id:
+            raise ValueError("A dispatch contract requires an explicit build_id")
+        return {
+            **self.descriptor(),
+            "build_id": self.build_id,
+            "replay_version": REPLAY_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+        }
 
 
 @dataclass(frozen=True)
@@ -259,6 +277,19 @@ class SignalRef(Generic[InputT]):
 
     def __post_init__(self) -> None:
         name(self.name)
+
+
+@dataclass(frozen=True)
+class Deferred:
+    """Opaque marker returned by a task delegating its completion."""
+
+    token: str
+
+
+@dataclass(frozen=True)
+class BroadcastBinding:
+    topic: TopicRef[Any]
+    handler: HandlerRef[Any, Any]
 
 
 @dataclass(frozen=True)
@@ -298,13 +329,16 @@ def workflow(
         inp = hints.get(params[1].name, Any) if input_type is None else input_type
         out = hints.get("return", Any) if output_type is None else output_type
         ref: WorkflowRef[Any, Any] = WorkflowRef(name, inp, out, version)
-        try:
-            source = inspect.getsource(fn)
-        except (OSError, TypeError):
-            if build_id is None:
+        if build_id is None:
+            try:
+                source = inspect.getsource(fn)
+            except (OSError, TypeError):
                 raise ValueError("Dynamic workflows require a stable build_id") from None
-            source = ""
-        ident = build_id or hashlib.sha256(source.encode()).hexdigest()
+            ident = hashlib.sha256(source.encode()).hexdigest()
+        else:
+            ident = build_id
+        if not isinstance(ident, str) or not ident or len(ident) > 256:
+            raise ValueError("Invalid workflow build_id")
         setattr(fn, "__duraflow_workflow__", WorkflowDefinition(ref, fn, ident))
         return fn
 

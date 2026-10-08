@@ -9,12 +9,12 @@ from uuid import uuid4
 
 import pytest
 
-from duraflow import Client, Registry
+from duraflow import LegacyClient as Client, Registry
 from duraflow.config import RuntimeSettings
 from duraflow.contracts import Conflict
 from duraflow.retention import RetentionPolicy
 from duraflow.security import AuthorizationError, secret_value, validate_production_connections
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from duraflow.transport import PulsarTransport
 from tests.test_engine import double, sequence
 

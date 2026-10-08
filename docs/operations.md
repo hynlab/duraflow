@@ -1,5 +1,9 @@
 # Deployment, inspection and recovery
 
+> Historical protocol-1 operations. For the current message-driven roles and
+> commands, see [guide 6](../guide/6_operations.md). Add `--legacy` to the commands
+> below when draining existing protocol-1 runs.
+
 ## Deployment assumptions
 
 Run PostgreSQL 16 and a supported Pulsar broker independently of application

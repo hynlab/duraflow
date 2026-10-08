@@ -9,10 +9,20 @@ from uuid import uuid4
 
 import pytest
 
-from duraflow import Client, Conflict, Engine, MemoryTransport, Registry, SQLiteStore, Worker, WorkflowContext, workflow
+from duraflow import (
+    LegacyClient as Client,
+    Conflict,
+    LegacyEngine as Engine,
+    MemoryTransport,
+    Registry,
+    SQLiteStore,
+    LegacyWorker as Worker,
+    WorkflowContext,
+    workflow,
+)
 from duraflow.cli import execute, parser
 from duraflow.postgres import PostgresStore
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from duraflow.transport import PulsarTransport
 from .test_engine import broadcast, a, b, c, bindings, sequence, double
 
@@ -88,9 +98,9 @@ async def test_pulsar_provisioning_closes_idle_consumer(monkeypatch: Any) -> Non
 
 async def test_cli_read_and_explicit_control(tmp_path: Any) -> None:
     database = f"sqlite:///{tmp_path / 'cli.db'}"
-    assert (await execute(parser().parse_args(["--database", database, "init"])))["initialized"]
-    assert (await execute(parser().parse_args(["--database", database, "health"])))["store_readable"]
-    assert await execute(parser().parse_args(["--database", database, "list"])) == []
+    assert (await execute(parser().parse_args(["--legacy", "--database", database, "init"])))["initialized"]
+    assert (await execute(parser().parse_args(["--legacy", "--database", database, "health"])))["store_readable"]
+    assert await execute(parser().parse_args(["--legacy", "--database", database, "list"])) == []
     with pytest.raises(SystemExit):
         parser().parse_args(["terminate", "a-run", "--actor", "a", "--reason", "b", "--request-id", "c"])
 

@@ -60,7 +60,6 @@ def validate_production_connections(database_url: str, broker_url: str, token: s
     """Fail closed before any connection or secret-bearing authentication request."""
     try:
         db = urlsplit(database_url)
-        broker = urlsplit(broker_url)
         params = parse_qs(db.query, keep_blank_values=True, strict_parsing=True)
         if db.scheme != "postgresql+psycopg" or not db.hostname or not db.username or not db.path.strip("/"):
             raise ValueError()
@@ -70,6 +69,21 @@ def validate_production_connections(database_url: str, broker_url: str, token: s
             key in params for key in ("service", "host", "hostaddr")
         ):
             raise ValueError()
+        if db.fragment:
+            raise ValueError()
+        _ = db.port
+    except (TypeError, ValueError):
+        raise ValueError(
+            "Production requires verified PostgreSQL TLS, authenticated Pulsar TLS and explicit CA bundles"
+        ) from None
+    validate_ca(params["sslrootcert"][0], "PostgreSQL")
+    validate_production_broker(broker_url, token, ca)
+
+
+def validate_production_broker(broker_url: str, token: str | None, ca: str | None) -> None:
+    """Executors and clients validate TLS without needing workflow DB credentials."""
+    try:
+        broker = urlsplit(broker_url)
         if (
             broker.scheme != "pulsar+ssl"
             or not broker.hostname
@@ -77,16 +91,14 @@ def validate_production_connections(database_url: str, broker_url: str, token: s
             or broker.password
             or broker.query
             or broker.fragment
+            or not token
+            or len(token.encode()) > 16384
+            or any(ord(c) < 32 for c in token)
         ):
             raise ValueError()
-        if db.fragment or not token or len(token.encode()) > 16384 or any(ord(c) < 32 for c in token):
-            raise ValueError()
-        _ = db.port, broker.port
+        _ = broker.port
     except (TypeError, ValueError):
-        raise ValueError(
-            "Production requires verified PostgreSQL TLS, authenticated Pulsar TLS and explicit CA bundles"
-        ) from None
-    validate_ca(params["sslrootcert"][0], "PostgreSQL")
+        raise ValueError("Production requires authenticated Pulsar TLS and an explicit CA bundle") from None
     validate_ca(ca, "Pulsar")
 
 

@@ -1,6 +1,16 @@
 """Independent, Apache-2.0 Python durable workflow engine."""
 
+from .legacy_client import Client as LegacyClient, WorkflowHandle as LegacyWorkflowHandle
 from .client import Client, WorkflowHandle
+from .channels import ChannelRef, SignalFilter, SignalStream
+from .broker import MemoryBroker
+from .message_store import MemoryMessageStore, SQLiteMessageStore
+from .messaging import Topics
+from .workflow_engine import WorkflowEngine
+from .workflow_worker import WorkflowWorker
+from .task_worker import TaskWorker
+from .tag_engine import TagEngine
+from .task_tags import TaskTagEngine
 from .contracts import (
     Archived,
     Clock,
@@ -26,9 +36,12 @@ from .contracts import (
     task,
     workflow,
 )
-from .coordinator import Engine
-from .replay import BroadcastResult, Operation, RaceResult, WorkflowContext
-from .runner import BroadcastBinding, Deferred, TaskContext, Worker
+from .coordinator import Engine as LegacyEngine
+from .replay import BroadcastResult, Operation, RaceResult
+from .workflow_replay import WorkflowContext, Future
+from .contracts import BroadcastBinding, Deferred
+from .runner import Worker as LegacyWorker
+from .task_worker import TaskContext
 from .storage import MemoryStore, SQLiteStore, Store
 from .transport import MemoryTransport, PulsarTransport, Transport
 
@@ -37,15 +50,22 @@ __all__ = [
     "Archived",
     "BroadcastBinding",
     "BroadcastResult",
+    "ChannelRef",
     "Client",
     "Clock",
     "Conflict",
     "Deferred",
     "DuraflowError",
-    "Engine",
+    "Future",
     "HandlerRef",
+    "LegacyClient",
+    "LegacyEngine",
+    "LegacyWorker",
+    "LegacyWorkflowHandle",
     "ManualClock",
     "MemoryStore",
+    "MemoryBroker",
+    "MemoryMessageStore",
     "MemoryTransport",
     "NonDeterminism",
     "NotFound",
@@ -56,6 +76,9 @@ __all__ = [
     "Registry",
     "RetryPolicy",
     "SQLiteStore",
+    "SQLiteMessageStore",
+    "SignalFilter",
+    "SignalStream",
     "SignalRef",
     "Store",
     "TaskCancelled",
@@ -63,14 +86,19 @@ __all__ = [
     "TaskFailure",
     "TaskOptions",
     "TaskRef",
+    "TaskWorker",
+    "TaskTagEngine",
+    "TagEngine",
     "TopicRef",
     "Transport",
+    "Topics",
     "UnsupportedWorkflow",
-    "Worker",
     "WorkflowBlocked",
     "WorkflowContext",
     "WorkflowFailed",
     "WorkflowHandle",
+    "WorkflowEngine",
+    "WorkflowWorker",
     "WorkflowRef",
     "task",
     "workflow",

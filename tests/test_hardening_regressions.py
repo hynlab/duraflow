@@ -13,14 +13,14 @@ from duraflow import (
     BroadcastBinding,
     Conflict,
     Deferred,
-    Engine,
+    LegacyEngine as Engine,
     HandlerRef,
     Registry,
     TaskCancelled,
     TaskFailure,
     TaskRef,
     TopicRef,
-    Worker,
+    LegacyWorker as Worker,
     WorkflowBlocked,
     WorkflowContext,
     WorkflowFailed,
@@ -38,7 +38,7 @@ from duraflow.contracts import (
 )
 from duraflow.replay import replay
 from duraflow.state import mutate, outbox, route, subscription
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from duraflow.transport import PulsarTransport
 from tests.test_engine import DOUBLE, double, sequence
 from tests.test_recovery import dispatch_first

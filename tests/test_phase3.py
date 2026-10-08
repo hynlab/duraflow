@@ -15,7 +15,7 @@ from duraflow.contracts import Conflict, ProtocolError
 from duraflow.observability import HealthState, JsonLogFormatter, ProbeServer, render_metrics, sample_health
 from duraflow.quarantine import decode_quarantine, quarantine, replay_quarantine
 from duraflow.supervision import ShutdownTimeout, supervise
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from duraflow.transport import MemoryTransport, PulsarTransport
 from tests.test_engine import DOUBLE, double, sequence
 from tests.test_recovery import dispatch_first
@@ -200,7 +200,7 @@ async def test_failed_dependency_disables_readiness():
 @pytest.mark.skipif(not os.getenv("DURAFLOW_TEST_POSTGRES"), reason="Native PostgreSQL not configured")
 async def test_native_telemetry_is_bounded_and_contains_no_payload():
     from uuid import uuid4
-    from duraflow import Client
+    from duraflow import LegacyClient as Client
     from duraflow.postgres import PostgresStore
 
     store = PostgresStore(os.environ["DURAFLOW_TEST_POSTGRES"])

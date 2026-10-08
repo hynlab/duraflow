@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from collections import deque
@@ -19,14 +20,24 @@ class Delivery:
     data: bytes
     properties: dict[str, str]
     receipt: Any
+    key: str | None = None
 
 
 class Transport(Protocol):
-    async def ensure(self, topic: str, subscription: str) -> None: ...
-    async def publish(self, topic: str, data: bytes, properties: dict[str, str]) -> None: ...
+    async def ensure(self, topic: str, subscription: str, *, ordered: bool = False) -> None: ...
+    async def publish(
+        self,
+        topic: str,
+        data: bytes,
+        properties: dict[str, str],
+        *,
+        key: str | None = None,
+        deliver_at: float | None = None,
+    ) -> None: ...
     async def receive(self, topic: str, subscription: str, timeout: float = 0.1) -> Delivery | None: ...
     async def ack(self, delivery: Delivery) -> None: ...
     async def nack(self, delivery: Delivery) -> None: ...
+    async def unsubscribe(self, topic: str, subscription: str) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -41,10 +52,22 @@ class MemoryTransport:
         self.publications: list[tuple[str, bytes, dict[str, str]]] = []
         self.counter, self.capacity = 0, capacity
 
-    async def ensure(self, topic: str, subscription: str) -> None:
+    async def ensure(self, topic: str, subscription: str, *, ordered: bool = False) -> None:
+        if ordered:
+            raise ValueError("Use MemoryBroker for ordered message subscriptions")
         self.queues.setdefault((topic, subscription), deque())
 
-    async def publish(self, topic: str, data: bytes, properties: dict[str, str]) -> None:
+    async def publish(
+        self,
+        topic: str,
+        data: bytes,
+        properties: dict[str, str],
+        *,
+        key: str | None = None,
+        deliver_at: float | None = None,
+    ) -> None:
+        if key is not None or deliver_at is not None:
+            raise ValueError("Use MemoryBroker for keyed or delayed messages")
         queues = [(key, queue) for key, queue in self.queues.items() if key[0] == topic]
         if any(len(queue) >= self.capacity for _, queue in queues):
             raise BufferError("Memory transport queue is full")
@@ -77,6 +100,12 @@ class MemoryTransport:
     async def close(self) -> None:
         self.redeliver_unacked()
 
+    async def unsubscribe(self, topic: str, subscription: str) -> None:
+        self.queues.pop((topic, subscription), None)
+        for key in list(self.inflight):
+            if key[:2] == (topic, subscription):
+                del self.inflight[key]
+
 
 class PulsarTransport:
     """Official client with off-loop native calls and bounded receiver queues.
@@ -106,6 +135,10 @@ class PulsarTransport:
             "tls_allow_insecure_connection": False,
             "tls_validate_hostname": True,
         }
+        native_logger = logging.getLogger("duraflow.pulsar.native")
+        native_logger.setLevel(logging.CRITICAL + 1)
+        native_logger.propagate = False
+        options["logger"] = native_logger
         if authentication is not None:
             options["authentication"] = authentication
         if tls_trust_certs_file_path is not None:
@@ -115,15 +148,18 @@ class PulsarTransport:
         self.consumers: dict[tuple[str, str], Any] = {}
         self.producers: dict[str, Any] = {}
         self.provisioned: set[tuple[str, str]] = set()
+        self.ordered: set[tuple[str, str]] = set()
         self.lock = asyncio.Lock()
         self.native_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="duraflow-pulsar")
         self.native_slots = asyncio.Semaphore(8)
         self.operation_timeout = operation_timeout
         self._closed = False
 
-    async def ensure(self, topic: str, subscription: str) -> None:
+    async def ensure(self, topic: str, subscription: str, *, ordered: bool = False) -> None:
         async with self.lock:
             key = topic, subscription
+            if key in self.provisioned and ordered != (key in self.ordered):
+                raise ValueError("Cannot change an existing subscription's ordering mode")
             if key not in self.provisioned:
                 if len(self.provisioned) >= self.max_routes:
                     raise ValueError("Declared subscription limit exceeded")
@@ -131,16 +167,27 @@ class PulsarTransport:
                     self.client.subscribe,
                     topic,
                     subscription,
-                    consumer_type=self.pulsar.ConsumerType.Shared,
+                    consumer_type=self.pulsar.ConsumerType.KeyShared if ordered else self.pulsar.ConsumerType.Shared,
                     initial_position=self.pulsar.InitialPosition.Earliest,
                     receiver_queue_size=1,
+                    negative_ack_redelivery_delay_ms=1000,
                 )
                 # Never retain an idle coordinator consumer: it would prefetch
                 # and steal work. Closing returns any prefetched delivery.
                 await self._native(consumer.close)
                 self.provisioned.add(key)
+                if ordered:
+                    self.ordered.add(key)
 
-    async def publish(self, topic: str, data: bytes, properties: dict[str, str]) -> None:
+    async def publish(
+        self,
+        topic: str,
+        data: bytes,
+        properties: dict[str, str],
+        *,
+        key: str | None = None,
+        deliver_at: float | None = None,
+    ) -> None:
         async with self.lock:
             if topic not in self.producers:
                 if len(self.producers) >= self.max_routes:
@@ -153,10 +200,19 @@ class PulsarTransport:
                     max_pending_messages=64,
                     send_timeout_millis=5000,
                 )
-        await self._native(self.producers[topic].send, data, properties=properties)
+        options: dict[str, Any] = {"properties": properties}
+        if key is not None:
+            options["partition_key"] = key
+        if deliver_at is not None:
+            import math
+
+            if not math.isfinite(deliver_at) or deliver_at < 0:
+                raise ValueError("Delivery time must be a finite UTC timestamp")
+            options["deliver_at"] = math.ceil(deliver_at * 1000)
+        await self._native(self.producers[topic].send, data, **options)
 
     async def receive(self, topic: str, subscription: str, timeout: float = 0.1) -> Delivery | None:
-        await self.ensure(topic, subscription)
+        await self.ensure(topic, subscription, ordered=(topic, subscription) in self.ordered)
         async with self.lock:
             key = topic, subscription
             if key not in self.consumers:
@@ -164,21 +220,35 @@ class PulsarTransport:
                     self.client.subscribe,
                     topic,
                     subscription,
-                    consumer_type=self.pulsar.ConsumerType.Shared,
+                    consumer_type=self.pulsar.ConsumerType.KeyShared
+                    if key in self.ordered
+                    else self.pulsar.ConsumerType.Shared,
                     initial_position=self.pulsar.InitialPosition.Earliest,
                     receiver_queue_size=self.queue_size,
+                    negative_ack_redelivery_delay_ms=1000,
                 )
         try:
             message = await self._native(self.consumers[key].receive, timeout_millis=max(1, int(timeout * 1000)))
         except self.pulsar.Timeout:
             return None
-        return Delivery(topic, subscription, message.data(), message.properties(), message)
+        return Delivery(
+            topic, subscription, message.data(), message.properties(), message, message.partition_key() or None
+        )
 
     async def ack(self, delivery: Delivery) -> None:
         await self._native(self.consumers[delivery.topic, delivery.subscription].acknowledge, delivery.receipt)
 
     async def nack(self, delivery: Delivery) -> None:
         await self._native(self.consumers[delivery.topic, delivery.subscription].negative_acknowledge, delivery.receipt)
+
+    async def unsubscribe(self, topic: str, subscription: str) -> None:
+        key = topic, subscription
+        async with self.lock:
+            consumer = self.consumers.pop(key, None)
+            if consumer is not None:
+                await self._native(consumer.unsubscribe)
+            self.provisioned.discard(key)
+            self.ordered.discard(key)
 
     async def close(self) -> None:
         if self._closed:

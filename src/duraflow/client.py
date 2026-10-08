@@ -1,312 +1,361 @@
-"""Trusted shared-store SDK; no HTTP server or implicit worker implementation imports."""
+"""Broker-first Python SDK. Commands and results never require workflow DB access."""
 
 from __future__ import annotations
 
-from .security import authorize_control
-from .retention import RetentionPolicy
-
-from .contracts import clock_now
-
 import asyncio
-import hashlib
-import hmac
+import logging
 from typing import Any
 from uuid import uuid4
 
+from .channels import ChannelRef
 from .contracts import (
     Archived,
-    Clock,
     Conflict,
+    NotFound,
     Registry,
-    SignalRef,
-    TERMINAL,
-    TaskFailure,
-    TaskRef,
     WorkflowBlocked,
     WorkflowFailed,
+    WorkflowRef,
     decode,
-    duration,
     encode,
-    fingerprint,
-    name,
     schema_id,
 )
-from .state import attempt, event, mutate, new_run, wake
-from .storage import State, Store
-from .lifecycle import record_observation
+from .messaging import Message, Topics
+from .state import identity
+from .transport import Transport
 
 
 class Client:
     def __init__(
-        self, store: Store, registry: Registry | None = None, *, namespace: str = "default", clock: Clock | None = None
-    ):
-        self.store, self.registry = store, registry or Registry()
-        self.namespace, self.clock = name(namespace), clock or Clock()
-
-    async def start(
         self,
-        workflow: Any,
-        value: Any,
+        transport: Transport,
+        registry: Registry | None = None,
         *,
-        request_id: str,
-        workflow_id: str | None = None,
-        tags: tuple[str, ...] = (),
-        _run_id: str | None = None,
+        namespace: str = "default",
+        topics: Topics | None = None,
+        client_id: str | None = None,
+        timeout: float = 30,
+    ):
+        self.transport, self.registry = transport, registry or Registry()
+        self.topics = topics or Topics(namespace=namespace)
+        self.id = client_id or str(uuid4())
+        self.timeout = timeout
+        self.replies: dict[str, dict[str, Any]] = {}
+        self.lock = asyncio.Lock()
+        self.pending: set[str] = set()
+        self.closed = False
+
+    async def _send(self, topic: str, message: Message) -> None:
+        await self.transport.publish(topic, message.to_bytes(), {}, key=message.key)
+
+    def _contract(self, workflow: Any) -> tuple[WorkflowRef[Any, Any], dict[str, Any]]:
+        definition = getattr(workflow, "__duraflow_workflow__", None)
+        if definition is not None:
+            return definition.ref, definition.manifest
+        if isinstance(workflow, WorkflowRef) and workflow.build_id:
+            return workflow, workflow.manifest
+        definition = self.registry.resolve(workflow)
+        return definition.ref, definition.manifest
+
+    async def request(
+        self,
+        workflow: str,
+        workflow_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        topic: str | None = None,
+    ) -> Any:
+        correlation_id = str(uuid4())
+        if self.closed:
+            raise RuntimeError("Client is closed")
+        reply_to = self.topics.reply(self.id)
+        await self.transport.ensure(reply_to, "client")
+        message = Message(
+            kind,
+            self.topics.instance(workflow, workflow_id),
+            {**body, "reply_to": reply_to, "correlation_id": correlation_id},
+        )
+        self.pending.add(correlation_id)
+        try:
+            target = self.topics.control(workflow) if kind == "control" else self.topics.commands(workflow)
+            await self._send(topic or target, message)
+            async with asyncio.timeout(self.timeout if timeout is None else timeout):
+                while correlation_id not in self.replies:
+                    if self.closed:
+                        raise RuntimeError("Client is closed")
+                    async with self.lock:
+                        if correlation_id in self.replies:
+                            break
+                        delivery = await self.transport.receive(reply_to, "client")
+                        if delivery is not None:
+                            response = Message.from_bytes(delivery.data)
+                            if response.kind != "response":
+                                raise ValueError("Unexpected client response")
+                            if response.body["correlation_id"] in self.pending:
+                                self.replies[response.body["correlation_id"]] = response.body
+                            await self.transport.ack(delivery)
+                    await asyncio.sleep(0.005)
+            reply = self.replies.pop(correlation_id)
+        finally:
+            self.pending.discard(correlation_id)
+            self.replies.pop(correlation_id, None)
+            if kind == "result":
+                try:
+                    async with asyncio.timeout(2):
+                        await self._send(
+                            self.topics.commands(workflow),
+                            Message(
+                                "remove_waiter",
+                                self.topics.instance(workflow, workflow_id),
+                                {"correlation_id": correlation_id},
+                            ),
+                        )
+                except Exception as exc:
+                    logging.getLogger("duraflow.messages").warning(
+                        "publication_failed", extra={"error_type": type(exc).__name__}
+                    )
+        error = reply.get("error")
+        if error:
+            raise {"NotFound": NotFound, "Conflict": Conflict, "Archived": Archived}.get(error, WorkflowFailed)(error)
+        return reply.get("value")
+
+    async def dispatch(
+        self, workflow: Any, value: Any, *, request_id: str, workflow_id: str | None = None, tags: tuple[str, ...] = ()
     ) -> WorkflowHandle:
-        if not request_id or len(request_id) > 256:
-            raise ValueError("request_id must contain 1..256 characters")
+        ref, manifest = self._contract(workflow)
+        if not request_id or len(request_id) > 256 or len(tags) > 32:
+            raise ValueError("Invalid start identity or tags")
         workflow_id = workflow_id or request_id
-        if len(workflow_id) > 256 or len(tags) > 32:
-            raise ValueError("Identity/tag limit exceeded")
+        if not workflow_id or len(workflow_id) > 256:
+            raise ValueError("Invalid workflow identity")
+        from .contracts import name
+
         for tag in tags:
             name(tag)
-        definition = self.registry.resolve(workflow)
-        value = encode(value, definition.ref.input_type)
-        digest = fingerprint([definition.manifest, workflow_id, value, sorted(set(tags))])
-        state = new_run(
-            definition, self.namespace, _run_id or str(uuid4()), workflow_id, value, clock_now(self.clock), tags
+        run_id = identity(self.topics.instance(ref.name, workflow_id), "run/" + request_id)
+        body = {
+            "namespace": self.topics.namespace,
+            "manifest": manifest,
+            "input": encode(value, ref.input_type),
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "request_id": request_id,
+            "tags": sorted(set(tags)),
+        }
+        await self._send(
+            self.topics.commands(ref.name),
+            Message("start", self.topics.instance(ref.name, workflow_id), body),
         )
-        saved = await self.store.create(state, request_id, digest)
-        return WorkflowHandle(self, saved["run_id"], definition.ref.output_type)
+        return WorkflowHandle(self, ref.name, workflow_id, run_id, ref.output_type, request_id=request_id)
 
-    def get_handle(self, run_id: str, output_type: Any = Any) -> WorkflowHandle:
-        return WorkflowHandle(self, run_id, output_type)
+    async def start(
+        self, workflow: Any, value: Any, *, request_id: str, workflow_id: str | None = None, tags: tuple[str, ...] = ()
+    ) -> WorkflowHandle:
+        ref, manifest = self._contract(workflow)
+        # dispatch() offers broker acceptance; start() additionally waits for engine acceptance.
+        workflow_id = workflow_id or request_id
+        if not request_id or len(request_id) > 256 or not workflow_id or len(workflow_id) > 256 or len(tags) > 32:
+            raise ValueError("Invalid start identity or tags")
+        from .contracts import name
 
-    async def current(self, workflow_id: str) -> WorkflowHandle:
-        return self.get_handle(await self.store.head(self.namespace, workflow_id))
+        for tag in tags:
+            name(tag)
+        run_id = identity(self.topics.instance(ref.name, workflow_id), "run/" + request_id)
+        result = await self.request(
+            ref.name,
+            workflow_id,
+            "start",
+            {
+                "namespace": self.topics.namespace,
+                "manifest": manifest,
+                "input": encode(value, ref.input_type),
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "request_id": request_id,
+                "tags": sorted(set(tags)),
+            },
+        )
+        return WorkflowHandle(self, ref.name, workflow_id, result["run_id"], ref.output_type)
 
-    async def list(self, *, after: str = "", limit: int = 100, tags: tuple[str, ...] = ()) -> list[State]:
-        if not 1 <= limit <= 1000:
-            raise ValueError("limit must be in 1..1000")
-        result: list[State] = []
-        cursor = after
-        while len(result) < limit:
-            rows = await self.store.scan(self.namespace, cursor, min(100, limit - len(result)))
-            if not rows:
-                break
-            result.extend(row for row in rows if set(tags) <= set(row["tags"]))
-            cursor = rows[-1]["run_id"]
-        return result
+    def get_handle(self, workflow: Any, workflow_id: str, *, run_id: str | None = None) -> WorkflowHandle:
+        ref = workflow if isinstance(workflow, WorkflowRef) else self._contract(workflow)[0]
+        return WorkflowHandle(self, ref.name, workflow_id, run_id, ref.output_type)
 
-    async def control_tagged(
+    async def signal(
         self,
-        action: str,
+        workflow: Any,
+        workflow_id: str,
+        channel: ChannelRef[Any],
+        value: Any,
         *,
-        tags: tuple[str, ...],
-        actor: str,
-        reason: str,
-        request_id: str,
-        after: str = "",
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        if action not in {"cancel", "terminate", "resume"} or not tags or not request_id:
-            raise ValueError("Specify tags, a request_id and cancel/terminate/resume")
-        if len(request_id) > 128:
-            raise ValueError("Batch request_id exceeds 128 characters")
-        snapshot = await self.list(after=after, limit=limit, tags=tags)
-        outcomes = {}
-        for row in snapshot:
-            handle = self.get_handle(row["run_id"])
-            try:
-                await handle._control(action, actor=actor, reason=reason, request_id=f"{request_id}/{row['run_id']}")
-                outcomes[row["run_id"]] = "accepted"
-            except Conflict:
-                outcomes[row["run_id"]] = "conflict"
-        return {"outcomes": outcomes, "next_after": snapshot[-1]["run_id"] if snapshot else None}
+        signal_id: str,
+        payload_type: Any = None,
+    ) -> Any:
+        return await self.get_handle(workflow, workflow_id).signal(
+            channel, value, signal_id=signal_id, payload_type=payload_type
+        )
 
-    async def signal_workflow(self, workflow_id: str, ref: SignalRef[Any], value: Any, *, signal_id: str) -> None:
-        run_id = await self.store.head(self.namespace, workflow_id)
-        for _ in range(100):
-            try:
-                await self.get_handle(run_id).signal(ref, value, signal_id=signal_id)
-                return
-            except Conflict:
-                state = await self.store.load(self.namespace, run_id)
-                if state["status"] != "CONTINUED":
-                    raise
-                run_id = state["continued_run_id"]
-        raise Conflict("Too many concurrent rollovers")
+    async def signal_tagged(
+        self, workflow: Any, tag: str, channel: ChannelRef[Any], value: Any, *, signal_id: str, payload_type: Any = None
+    ) -> None:
+        ref = workflow if isinstance(workflow, WorkflowRef) else self._contract(workflow)[0]
+        from .contracts import name
+
+        name(tag)
+        if not signal_id or len(signal_id) > 256:
+            raise ValueError("Invalid signal ID")
+        encoded = encode(value, channel.payload_type if payload_type is None else payload_type)
+        decode(encoded, channel.payload_type)
+        message = Message(
+            "tag_signal",
+            f"{self.topics.namespace}/{tag}",
+            {
+                "tag": tag,
+                "workflow": ref.name,
+                "channel": channel.name,
+                "schema": schema_id(channel.payload_type),
+                "payload_schema": schema_id(channel.payload_type if payload_type is None else payload_type),
+                "payload": encoded,
+                "signal_id": signal_id,
+            },
+        )
+        await self._send(self.topics.tags(), message)
 
     async def complete_external(
-        self, token: str, value: Any = None, *, ref: TaskRef[Any, Any], error: dict[str, Any] | None = None
+        self, token: str, value: Any = None, *, ref: Any, error: dict[str, Any] | None = None
     ) -> bool:
+        import base64
+        from .contracts import parse_json
+
         try:
-            run_id, node_id, number, epoch, _ = token.split("/", 4)
-            number_int, epoch_int = int(number), int(epoch)
-        except (ValueError, AttributeError):
-            raise ValueError("Invalid completion token") from None
-        digest = hashlib.sha256(token.encode()).hexdigest()
-        observation = {
-            "result": encode(value, ref.output_type) if error is None else None,
-            "error": TaskFailure(error).error if error is not None else None,
-        }
+            body = parse_json(base64.urlsafe_b64decode(token))
+            if body["ref"] != ref.descriptor():
+                raise ValueError()
+        except Exception:
+            raise ValueError("Invalid external completion token") from None
+        return bool(
+            await self.request(
+                "external",
+                body["dispatch_id"],
+                "complete_task",
+                {**body, "result": encode(value, ref.output_type) if error is None else None, "error": error},
+                topic=self.topics.task_completion(ref.name, ref.version),
+            )
+        )
 
-        def change(state: State) -> bool:
-            node = state["nodes"].get(node_id)
-            if node is None or node["spec"]["kind"] != "call" or node["spec"]["ref"] != ref.descriptor():
-                raise Conflict("Unknown or incompatible delegated invocation")
-            current = node["attempts"][-1]
-            deferred = current.get("deferred")
-            if (
-                current["number"] != number_int
-                or current["epoch"] != epoch_int
-                or not deferred
-                or not hmac.compare_digest(deferred["token_hash"], digest)
-            ):
-                raise Conflict("Completion token is invalid or superseded")
-            now = clock_now(self.clock)
-            if current["observation"] is not None:
-                return record_observation(state, node, observation, now, kind="external_observation")
-            if (
-                node["state"] != "pending"
-                or state["status"] in (TERMINAL - {"COMPLETED", "FAILED"})
-                or state["status"] == "CANCELLING"
-                or deferred["expires_at"] <= now
-            ):
-                raise Conflict("Delegated invocation no longer accepts completion")
-            changed = record_observation(state, node, observation, now, kind="external_observation")
-            if changed:
-                wake(state, f"external/{node_id}/{number_int}/{epoch_int}", now)
-            return changed
+    async def close(self) -> None:
+        """Close the reply subscription after outstanding requests have finished."""
+        self.closed = True
+        self.replies.clear()
+        if not self.pending:
+            await self.transport.unsubscribe(self.topics.reply(self.id), "client")
 
-        return bool(await mutate(self.store, self.namespace, run_id, change))
+    async def cancel_tasks_tagged(self, ref: Any, tag: str, *, request_id: str) -> None:
+        from .contracts import name, canonical
+
+        name(tag)
+        if not request_id or len(request_id) > 256:
+            raise ValueError("Invalid task tag request ID")
+        message = Message(
+            "task_tag_cancel",
+            canonical([self.topics.namespace, ref.name, ref.version, tag]),
+            {"request_id": request_id},
+        )
+        await self._send(self.topics.task_tags(control=True), message)
 
 
 class WorkflowHandle:
-    def __init__(self, client: Client, run_id: str, output_type: Any = Any):
-        self.client, self.run_id, self.output_type = client, run_id, output_type
+    def __init__(
+        self,
+        client: Client,
+        workflow: str,
+        workflow_id: str,
+        run_id: str | None,
+        output_type: Any = Any,
+        *,
+        request_id: str | None = None,
+    ):
+        self.client, self.workflow, self.workflow_id, self.run_id, self.output_type = (
+            client,
+            workflow,
+            workflow_id,
+            run_id,
+            output_type,
+        )
+        self.request_id = request_id
 
-    async def describe(self) -> State:
-        return await self.client.store.load(self.client.namespace, self.run_id)
+    async def describe(self) -> dict[str, Any]:
+        return await self.client.request(self.workflow, self.workflow_id, "query", {"run_id": self.run_id})
 
     async def history(self, *, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000:
-            raise ValueError("limit must be in 1..1000")
-        state = await self.describe()
-        if state["archived"]:
-            raise Archived(self.run_id)
-        return [row for row in state["history"] if row["sequence"] > after][:limit]
+            raise ValueError("Invalid history limit")
+        return [item for item in (await self.describe())["history"] if item["sequence"] > after][:limit]
 
-    async def result(
-        self, *, timeout: float | None = None, poll_interval: float = 0.1, follow_continued: bool = False
-    ) -> Any:
-        duration(poll_interval)
-
+    async def result(self, *, timeout: float | None = None, follow_continued: bool = True) -> Any:
         async def wait() -> Any:
             handle = self
             while True:
-                state = await handle.describe()
-                if state["archived"]:
-                    raise Archived(handle.run_id)
-                if state["status"] == "COMPLETED":
-                    return decode(state["result"], self.output_type)
-                if state["status"] == "BLOCKED":
-                    raise WorkflowBlocked(str(state["blocked_reason"]))
-                if state["status"] == "CONTINUED" and follow_continued:
-                    handle = self.client.get_handle(state["continued_run_id"], self.output_type)
-                elif state["status"] in TERMINAL:
-                    raise WorkflowFailed(f"{state['status']}: {state['error']}")
-                await asyncio.sleep(poll_interval)
+                result = await self.client.request(
+                    self.workflow,
+                    self.workflow_id,
+                    "result",
+                    {"run_id": handle.run_id, "request_id": handle.request_id},
+                    timeout=timeout or 86400 * 365,
+                )
+                if result["status"] == "COMPLETED":
+                    return decode(result["result"], self.output_type)
+                if result["status"] == "BLOCKED":
+                    raise WorkflowBlocked(result["blocked_reason"])
+                if result["status"] == "CONTINUED" and follow_continued:
+                    handle = WorkflowHandle(
+                        self.client, self.workflow, self.workflow_id, result["continued_run_id"], self.output_type
+                    )
+                    continue
+                raise WorkflowFailed(result["status"])
 
         async with asyncio.timeout(timeout):
             return await wait()
 
-    async def signal(self, ref: SignalRef[Any], value: Any, *, signal_id: str) -> None:
+    async def signal(self, channel: ChannelRef[Any], value: Any, *, signal_id: str, payload_type: Any = None) -> Any:
         if not signal_id or len(signal_id) > 256:
-            raise ValueError("signal_id must contain 1..256 characters")
-        payload = encode(value, ref.payload_type)
-        descriptor = {"id": signal_id, "name": ref.name, "schema": schema_id(ref.payload_type), "payload": payload}
-        digest = fingerprint(descriptor)
-
-        def change(state: State) -> None:
-            previous = state["signal_keys"].get(signal_id)
-            if previous is not None:
-                if previous != digest:
-                    raise Conflict("Signal ID reused with different data")
-                return
-            if state["status"] in TERMINAL or state["archived"]:
-                raise Conflict("Run no longer accepts new signals")
-            if len(state["signal_keys"]) >= 10_000 or sum(not s["consumed"] for s in state["signals"]) >= 1000:
-                raise Conflict("Signal mailbox/idempotency quota exceeded")
-            if any(s["name"] == ref.name and s["schema"] != descriptor["schema"] for s in state["signals"]):
-                raise Conflict("Signal channel schema is already pinned to another contract")
-            sequence = event(
-                state, "signal_received", clock_now(self.client.clock), signal_id=signal_id, channel=ref.name
-            )
-            state["signals"].append({**descriptor, "sequence": sequence, "consumed": False})
-            state["signal_keys"][signal_id] = digest
-            wake(state, f"signal/{signal_id}", clock_now(self.client.clock))
-
-        await mutate(self.client.store, self.client.namespace, self.run_id, change)
+            raise ValueError("Invalid signal ID")
+        encoded = encode(value, channel.payload_type if payload_type is None else payload_type)
+        decode(encoded, channel.payload_type)
+        return await self.client.request(
+            self.workflow,
+            self.workflow_id,
+            "signal",
+            {
+                "run_id": self.run_id,
+                "channel": channel.name,
+                "schema": schema_id(channel.payload_type),
+                "payload_schema": schema_id(channel.payload_type if payload_type is None else payload_type),
+                "payload": encoded,
+                "signal_id": signal_id,
+            },
+        )
 
     async def _control(
-        self,
-        action: str,
-        *,
-        actor: str,
-        reason: str,
-        request_id: str,
-        node_id: str | None = None,
-        _internal: bool = False,
+        self, action: str, *, actor: str, reason: str, request_id: str, node_id: str | None = None
     ) -> None:
         if not actor or not reason or not request_id or len(actor) > 128 or len(reason) > 1000 or len(request_id) > 256:
-            raise ValueError("Controls require bounded actor, reason and request_id")
-        if action not in {"cancel", "terminate", "resume", "retry"}:
-            raise ValueError("Unsupported operator action")
-        principal = await authorize_control(self.client.store, action, internal=_internal)
-        digest = fingerprint([action, actor, reason, node_id])
-
-        def change(state: State) -> None:
-            if request_id in state["actions"]:
-                if state["actions"][request_id] != digest:
-                    raise Conflict("Operator request key reused")
-                return
-            if state["status"] in TERMINAL:
-                raise Conflict("Terminal executions cannot be reopened")
-            if len(state["actions"]) >= 1000:
-                raise Conflict("Operator action quota exceeded")
-            now = clock_now(self.client.clock)
-            if action in {"cancel", "terminate"}:
-                state["status"] = "CANCELLING" if action == "cancel" else "TERMINATED"
-                for node in state["nodes"].values():
-                    if node["state"] in {"pending", "blocked"}:
-                        node["cancel_requested"] = True
-                        node["cancel_policy"] = 2
-                        node.setdefault("cancel_requested_seq", state["sequence"] + 1)
-                        if node["state"] == "blocked":
-                            node["state"] = "pending"
-                if action == "terminate":
-                    state["finished_at"] = now
-            elif action == "resume":
-                if state["status"] != "BLOCKED" or any(n["state"] == "blocked" for n in state["nodes"].values()):
-                    raise Conflict(
-                        "Resume requires a blocked execution without an exhausted task; retry that task first"
-                    )
-                state["status"], state["blocked_reason"] = "WAITING", None
-            elif action == "retry":
-                node = state["nodes"].get(node_id)
-                if state["status"] != "BLOCKED" or node is None or node["state"] != "blocked":
-                    raise Conflict("Retry requires a blocked invocation")
-                node["state"] = "pending"
-                node["attempts"].append(attempt(node["attempts"][-1]["number"] + 1, now))
-                remaining = any(n["state"] == "blocked" for n in state["nodes"].values())
-                state["status"] = "BLOCKED" if remaining else "WAITING"
-                if not remaining:
-                    state["blocked_reason"] = None
-            state["actions"][request_id] = digest
-            event(
-                state,
-                "operator_action",
-                now,
-                action=action,
-                actor=actor,
-                reason=reason,
-                node_id=node_id,
-                principal=principal,
-            )
-            wake(state, f"control/{request_id}", clock_now(self.client.clock))
-
-        await mutate(self.client.store, self.client.namespace, self.run_id, change)
+            raise ValueError("Controls require bounded audit fields")
+        await self.client.request(
+            self.workflow,
+            self.workflow_id,
+            "control",
+            {
+                "run_id": self.run_id,
+                "action": action,
+                "actor": actor,
+                "reason": reason,
+                "request_id": request_id,
+                "node_id": node_id,
+            },
+        )
 
     async def cancel(self, *, actor: str, reason: str, request_id: str) -> None:
         await self._control("cancel", actor=actor, reason=reason, request_id=request_id)
@@ -320,34 +369,24 @@ class WorkflowHandle:
     async def retry_blocked_task(self, node_id: str, *, actor: str, reason: str, request_id: str) -> None:
         await self._control("retry", actor=actor, reason=reason, request_id=request_id, node_id=node_id)
 
-    async def archive(self, *, actor: str, reason: str, safety_horizon: float, retention: float) -> None:
-        principal = await authorize_control(self.client.store, "archive")
-        policy = getattr(self.client.store, "retention_policy", RetentionPolicy())
-        policy.validate(retention, safety_horizon)
-        if len(actor) > 128 or len(reason) > 1000:
-            raise ValueError("Archive audit fields exceed limits")
-        duration(safety_horizon)
+    async def archive(self, *, actor: str, reason: str, retention: float, safety_horizon: float) -> None:
+        from .contracts import duration
+
         duration(retention)
+        duration(safety_horizon)
         if not actor or not reason or retention < safety_horizon:
-            raise ValueError("Require actor/reason and retention >= redelivery safety horizon")
-
-        def change(state: State) -> None:
-            if state["archived"]:
-                return
-            if (
-                state["status"] not in TERMINAL
-                or state["finished_at"] is None
-                or clock_now(self.client.clock) - state["finished_at"] < retention
-                or any(not msg["delivered"] for msg in state["outbox"].values())
-                or any(node["state"] in {"pending", "blocked"} for node in state["nodes"].values())
-            ):
-                raise Conflict("Run is not safe to archive")
-            state["archived"] = True
-            state["input"], state["result"], state["error"], state["blocked_reason"] = None, None, None, None
-            for key in ("commands", "history", "signals"):
-                state[key] = []
-            for key in ("nodes", "outbox", "inbox"):
-                state[key] = {}
-            event(state, "archived", clock_now(self.client.clock), actor=actor, reason=reason, principal=principal)
-
-        await mutate(self.client.store, self.client.namespace, self.run_id, change)
+            raise ValueError("Archive requires audit fields and retention >= safety horizon")
+        await self.client.request(
+            self.workflow,
+            self.workflow_id,
+            "control",
+            {
+                "action": "archive",
+                "run_id": self.run_id,
+                "actor": actor,
+                "reason": reason,
+                "request_id": f"archive/{self.run_id or self.workflow_id}",
+                "retention": retention,
+                "safety_horizon": safety_horizon,
+            },
+        )

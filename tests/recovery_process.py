@@ -8,7 +8,7 @@ from pathlib import Path
 
 from duraflow import Registry, SQLiteStore
 from duraflow.state import subscription
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from tests.test_engine import A, B, a, b, c, broadcast, bindings
 
 

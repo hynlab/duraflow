@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from duraflow import Client
+from duraflow import LegacyClient as Client
 from duraflow.contracts import NotFound
 from scripts.fault_guard import compose, owned_service, project_name, restart
 from tests.native_fault_app import pipeline, registry

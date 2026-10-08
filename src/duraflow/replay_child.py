@@ -26,6 +26,10 @@ def main() -> None:
             registry = app.registry
             if not isinstance(registry, Registry):
                 return
+            # Compilation/schema lookup is bootstrap work, outside the activation
+            # watchdog. Warm contracts before announcing readiness.
+            for registered in registry.workflows.values():
+                registered.ref.descriptor()
         except Exception:
             return
         protocol_output.write(b'{"ready":true}\n')
@@ -42,7 +46,12 @@ def main() -> None:
                 if definition is None:
                     response = {"ok": False, "code": "MissingImplementation"}
                 else:
-                    activation = replay(definition, state)
+                    if state.get("execution_protocol") == 2:
+                        from .workflow_replay import execute
+
+                        activation = execute(definition, state)
+                    else:
+                        activation = replay(definition, state)
                     response = {"ok": True, "kind": activation.kind, "value": activation.value}
             except Exception as exc:
                 response = {"ok": False, "code": type(exc).__name__}

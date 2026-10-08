@@ -1,5 +1,9 @@
 # Architecture and execution contract
 
+> Historical protocol-1 execution contract. The current message-driven runtime
+> is documented in [the numbered architecture guide](../guide/8_architecture.md).
+> Existing protocol-1 histories retain the rules below during cutover.
+
 ## Public interfaces
 
 `@workflow(name, version, build_id)` marks an async `(context, input)` function;

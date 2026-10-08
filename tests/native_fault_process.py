@@ -9,7 +9,7 @@ import os
 import signal
 from pathlib import Path
 
-from duraflow import BroadcastBinding, Engine, Registry
+from duraflow import BroadcastBinding, LegacyEngine as Engine, Registry
 from duraflow.executor import ProcessReplayExecutor
 from duraflow.postgres import PostgresStore
 from duraflow.runner import Worker

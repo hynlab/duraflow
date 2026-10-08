@@ -10,12 +10,13 @@ import inspect
 import logging
 import secrets
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 from .contracts import (
     Clock,
+    BroadcastBinding,
+    Deferred,
     Conflict,
     MAX_PAYLOAD_BYTES,
     NotFound,
@@ -24,8 +25,6 @@ from .contracts import (
     TaskCancelled,
     TaskFailure,
     TaskRef,
-    HandlerRef,
-    TopicRef,
     decode,
     duration,
     encode,
@@ -40,17 +39,6 @@ from .quarantine import quarantine
 from .lifecycle import record_observation
 
 log = logging.getLogger("duraflow.worker")
-
-
-@dataclass(frozen=True)
-class Deferred:
-    token: str
-
-
-@dataclass(frozen=True)
-class BroadcastBinding:
-    topic: TopicRef[Any]
-    handler: HandlerRef[Any, Any]
 
 
 class TaskContext:

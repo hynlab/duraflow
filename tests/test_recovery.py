@@ -16,20 +16,20 @@ import pytest
 from duraflow import (
     Conflict,
     Deferred,
-    Engine,
+    LegacyEngine as Engine,
     Registry,
     RetryPolicy,
     TaskContext,
     TaskOptions,
     TaskRef,
-    Worker,
+    LegacyWorker as Worker,
     WorkflowContext,
     task,
     workflow,
 )
 from duraflow.contracts import ProtocolError, canonical
 from duraflow.state import route, subscription
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from duraflow.transport import Delivery
 from .test_engine import A, B, C, DOUBLE, HA, HB, HC, VALUES, a, b, c, double, sequence, parallel, broadcast, bindings
 

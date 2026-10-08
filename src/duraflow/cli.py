@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .client import Client
+from .legacy_client import Client
 from .config import RuntimeSettings
 from .retention import RetentionPolicy
 from .observability import configure_logging
@@ -29,6 +29,16 @@ from .transport import PulsarTransport
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="duraflow")
     root.add_argument("--database", default=None)
+    root.add_argument("--legacy", action="store_true", help="Drain protocol-1 executions using the polling runtime")
+    root.add_argument("--workflow", help="Workflow contract name:vN for inspecting a logical workflow ID")
+    root.add_argument("--tenant", default=os.environ.get("DURAFLOW_PULSAR_TENANT", "public"))
+    root.add_argument("--environment", default=os.environ.get("DURAFLOW_PULSAR_NAMESPACE", "default"))
+    root.add_argument("--schema", default=os.environ.get("DURAFLOW_MESSAGE_SCHEMA", "duraflow_messages"))
+    root.add_argument(
+        "--journal",
+        default=os.environ.get("DURAFLOW_TASK_JOURNAL_URL"),
+        help="Independent service execution journal URL",
+    )
     root.add_argument("--namespace", default=os.environ.get("DURAFLOW_NAMESPACE", "default"))
     root.add_argument("--app", help="Trusted module exporting registry, optional broadcasts and signals")
     root.add_argument("--broker", default=os.environ.get("DURAFLOW_PULSAR_URL", "pulsar://localhost:6650"))
@@ -39,7 +49,18 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--probe-port", type=int)
     root.add_argument("--probe-host")
     commands = root.add_subparsers(dest="command", required=True)
-    for command in ("init", "migrate", "health", "engine", "worker"):
+    for command in (
+        "init",
+        "migrate",
+        "health",
+        "engine",
+        "worker",
+        "workflow-engine",
+        "workflow-worker",
+        "task-worker",
+        "tag-engine",
+        "task-tag-engine",
+    ):
         commands.add_parser(command)
     listing = commands.add_parser("list")
     listing.add_argument("--after", default="")
@@ -50,9 +71,22 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--input", required=True, help="JSON input")
     start.add_argument("--request-id", required=True)
     start.add_argument("--workflow-id")
-    for command in ("describe", "history", "attempts", "signal", "cancel", "terminate", "resume", "retry", "archive"):
+    for command in (
+        "describe",
+        "history",
+        "attempts",
+        "result",
+        "signal",
+        "cancel",
+        "terminate",
+        "resume",
+        "retry",
+        "archive",
+    ):
         sub = commands.add_parser(command)
         sub.add_argument("run_id")
+        if command == "result":
+            sub.add_argument("--timeout", type=float, default=30)
         if command == "describe":
             sub.add_argument("--include-payload", action="store_true")
         if command == "history":
@@ -111,7 +145,6 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "run_id",
         "workflow_id",
         "status",
-        "revision",
         "manifest",
         "tags",
         "created_at",
@@ -121,7 +154,10 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "continued_run_id",
         "archived",
     )
-    return {key: state[key] for key in fields}
+    result = {key: state[key] for key in fields}
+    if "revision" in state:
+        result["revision"] = state["revision"]
+    return result
 
 
 async def service(args: argparse.Namespace, store: Store, app: Any, registry: Registry) -> dict[str, bool]:
@@ -187,6 +223,10 @@ async def service(args: argparse.Namespace, store: Store, app: Any, registry: Re
 
 
 async def execute(args: argparse.Namespace) -> Any:
+    if not args.legacy:
+        from .message_cli import execute as execute_messages
+
+        return await execute_messages(args)
     app = importlib.import_module(args.app) if args.app else None
     registry = getattr(app, "registry", Registry())
     settings = runtime_settings(args)
@@ -296,13 +336,13 @@ def main() -> None:
         raise SystemExit(2) from None
 
 
-def runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
+def runtime_settings(args: argparse.Namespace, *, environment: Any = None) -> RuntimeSettings:
     overrides = {"database_url": args.database, "broker_url": args.broker, "namespace": args.namespace}
     for field in ("production", "concurrency", "lease_seconds", "shutdown_timeout", "probe_port", "probe_host"):
         value = getattr(args, field, None)
         if value is not None:
             overrides[field] = value
-    return RuntimeSettings.from_environment(os.environ, **overrides)
+    return RuntimeSettings.from_environment(os.environ if environment is None else environment, **overrides)
 
 
 if __name__ == "__main__":

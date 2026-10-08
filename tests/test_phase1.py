@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from duraflow import Engine, Registry, TaskOptions, WorkflowContext, workflow
+from duraflow import LegacyEngine as Engine, Registry, TaskOptions, WorkflowContext, workflow
 from duraflow.contracts import ProtocolError, WorkflowBlocked, decode, encode, schema_id
 from duraflow.executor import ProcessReplayExecutor
 from duraflow.replay import replay
 from duraflow.state import route
-from duraflow.testing import TestEnvironment
+from duraflow.testing import LegacyTestEnvironment as TestEnvironment
 from tests.codec_payloads import Receipt, sample
 from tests.hardening_app import endless, endless_cleanup, healthy, registry, sleeping
 from tests.test_engine import DOUBLE, double, sequence
@@ -34,7 +34,7 @@ async def test_isolated_replay_watchdog_does_not_block_healthy_work(bad):
         try:
             async with asyncio.timeout(15):
                 await asyncio.gather(env.engine.advance(failed.run_id), env.engine.advance(good.run_id), monitor())
-            assert (await good.describe())["result"] == 5
+            assert (await good.describe())["result"] == 5, await good.describe()
             state = await failed.describe()
             assert state["status"] == "BLOCKED"
             assert state["blocked_reason"] == "REPLAY_DEADLINE_EXCEEDED"

@@ -17,6 +17,8 @@ EVENTS = frozenset(
         "runtime_message",
         "engine_iteration_failed",
         "worker_iteration_failed",
+        "consumer_iteration_failed",
+        "publication_failed",
         "task_claimed",
         "task_observed",
         "workflow_state_saved",
@@ -41,6 +43,8 @@ COUNTERS = frozenset(
         "duplicates",
         "stale_results",
         "quarantined",
+        "messages",
+        "errors",
     }
 )
 STATUSES = (
@@ -103,7 +107,15 @@ class HealthState:
 
 
 def render_metrics(runtime: Any, health: HealthState, role: str) -> str:
-    if role not in {"engine", "worker"}:
+    if role not in {
+        "engine",
+        "worker",
+        "workflow-engine",
+        "workflow-worker",
+        "task-worker",
+        "tag-engine",
+        "task-tag-engine",
+    }:
         raise ValueError("Unknown runtime role")
     lines = []
     for key in sorted(COUNTERS):
@@ -128,6 +140,11 @@ def render_metrics(runtime: Any, health: HealthState, role: str) -> str:
 
 async def sample_health(store: Any, transport: Any, registry: Any, role: str, *, timeout: float) -> dict[str, bool]:
     async def database() -> bool:
+        if store is None:
+            return True
+        ping = getattr(store, "ping", None)
+        if ping is not None:
+            return bool(await ping())
         version = getattr(store, "schema_version", None)
         if version is not None:
             return await version() == 2
@@ -145,7 +162,11 @@ async def sample_health(store: Any, transport: Any, registry: Any, role: str, *,
             return False
 
     db, messaging = await asyncio.gather(guarded(database), guarded(broker))
-    registered = bool(registry.workflows if role == "engine" else registry.tasks)
+    registered = (
+        True
+        if role in {"tag-engine", "task-tag-engine"} or (role == "workflow-engine" and registry is None)
+        else bool(registry.workflows if role in {"engine", "workflow-engine", "workflow-worker"} else registry.tasks)
+    )
     return {"database": db, "broker": messaging, "registry": registered}
 
 
