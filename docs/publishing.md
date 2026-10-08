@@ -1,7 +1,8 @@
 # Publishing Duraflow to PyPI
 
-The package is an Apache-2.0 alpha. Publishing does not close the production
-qualification gates described in `implementation_status.md`.
+Duraflow is distributed under Apache-2.0. Version 1.0.0 uses execution protocol 2;
+see the [upgrade guide](../guide/6_operations.md#upgrading-from-protocol-1) when
+moving from the earlier alpha's protocol-1 histories.
 
 ## One-time account authorization
 
@@ -43,7 +44,9 @@ requirements or PyPI authorization checks.
   checked-out package version matches that tag.
 - A commit to `main` changing `.github/pypi-release.txt`. This file is an explicit
   publishing request, not a status marker. Its contents must match the package
-  version. The initial request is `0.1.0a1`.
+  version. The existing marker records the earlier `0.1.0a1` request; leave it
+  unchanged when publishing through a release or manual workflow dispatch to
+  avoid triggering a second upload.
 
 Ordinary source/documentation commits do not publish. Forks cannot publish
 through this workflow. API tokens are not used as an implicit fallback.
@@ -75,10 +78,16 @@ reuse its filenames. Do not re-run a successfully published version blindly.
 ## Installing after successful publication
 
 ```bash
-python -m pip install 'duraflow==0.1.0a1'
-python -m pip install 'duraflow[postgres,pulsar]==0.1.0a1'
+pip install duraflow
+# Or pin the release:
+pip install 'duraflow==1.0.0'
 ```
 
 Python 3.12 or newer is required. These commands are valid only after the
 publication and verification jobs succeed; the presence of this document does
 not mean the PyPI project or version already exists.
+
+The base package includes SQLAlchemy, psycopg, and pulsar-client. Release smoke
+tests import these adapters from the installed wheel and from the published
+package without extras. CI checks base-wheel installation on Linux and macOS
+with Python 3.12 and 3.13.

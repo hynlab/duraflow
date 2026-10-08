@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e '.[dev,postgres]'
+      - run: python -m pip install -e '.[dev]'
       - run: make format-check
       - run: make lint
       - run: make typecheck
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e '.[dev,postgres,pulsar]'
+      - run: python -m pip install -e '.[dev]'
       - run: docker compose up -d --wait --wait-timeout 240
       - name: Required native services and frozen-codec compatibility
         env:
@@ -84,3 +84,41 @@ jobs:
       - name: Stop development infrastructure
         if: always()
         run: docker compose down -v
+  base-install:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install build && python -m build
+      - name: Install base wheel without extras
+        run: |
+          python -m venv "$RUNNER_TEMP/base-install"
+          "$RUNNER_TEMP/base-install/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/base-install/bin/python" -m pip check
+          "$RUNNER_TEMP/base-install/bin/python" -I -c 'import pulsar, psycopg, sqlalchemy, sqlite3; from duraflow import Runtime, RuntimeSettings'
+          "$RUNNER_TEMP/base-install/bin/duraflow" --help
+  compose-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the documented demo
+        run: docker compose -f docker-compose/compose.yaml up --build -d --wait --wait-timeout 300
+      - name: Execute and recover the example
+        run: |
+          test "$(docker compose -f docker-compose/compose.yaml run --rm -T client)" = "22"
+          docker compose -f docker-compose/compose.yaml restart workflow-engine
+          test "$(docker compose -f docker-compose/compose.yaml run --rm -T client)" = "22"
+      - name: Capture demo diagnostics
+        if: failure()
+        run: docker compose -f docker-compose/compose.yaml logs --tail=100
+      - name: Stop the demo
+        if: always()
+        run: docker compose -f docker-compose/compose.yaml down -v
