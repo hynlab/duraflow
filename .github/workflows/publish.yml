@@ -163,7 +163,7 @@ jobs:
   verify:
     needs: [build, publish]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -208,12 +208,12 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          # The Simple API may lag behind the JSON API after a new upload.
-          for attempt in {1..24}; do
+          # The Simple API can retain a pre-upload CDN response for up to 600s.
+          for attempt in {1..61}; do
             if python -m pip install --no-cache-dir --index-url https://pypi.org/simple "duraflow==$RELEASE_VERSION"; then
               break
             fi
-            if [ "$attempt" -eq 24 ]; then
+            if [ "$attempt" -eq 61 ]; then
               exit 1
             fi
             sleep 10
