@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from urllib.parse import urlsplit
 
 
@@ -60,13 +61,35 @@ def owned_service(service: str, *, require_running: bool = True) -> str:
 
 
 def interrupt(service: str) -> None:
+    from scripts.pytest_guard import record_resource
+
     owned_service(service)
+    record_resource("service", service=service)
     compose("kill", "-s", "SIGKILL", service)
 
 
 def restart(service: str) -> None:
     owned_service(service, require_running=False)
     compose("up", "-d", "--wait", "--wait-timeout", "180", service, timeout=210)
+
+
+def wait_healthy(service: str, timeout: float = 120) -> None:
+    """Wait after unpausing without racing a second Compose convergence operation."""
+    container = owned_service(service, require_running=False)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = json.loads(
+            subprocess.run(
+                ["docker", "inspect", container],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            ).stdout
+        )[0]["State"]
+        if state.get("Running") and not state.get("Paused") and state.get("Health", {}).get("Status") == "healthy":
+            return
+        time.sleep(0.2)
+    raise TimeoutError(f"Disposable {service} did not become healthy")
 
 
 if __name__ == "__main__":

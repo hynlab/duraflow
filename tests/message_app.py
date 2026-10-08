@@ -20,7 +20,7 @@ async def double(ctx, value: int) -> int:
             return
         marker = Path(directory) / (point + ".ready")
         marker.write_text("ready")
-        while True:
+        while not (Path(directory) / (point + ".release")).exists():
             await asyncio.sleep(0.02)
 
     if directory:
@@ -43,7 +43,7 @@ async def double(ctx, value: int) -> int:
 async def order(ctx: WorkflowContext, value: int) -> int:
     approvals = ctx.channel(APPROVAL).receive(max_signals=1)
     first = await ctx.call(DOUBLE, value)
-    if await approvals.next(timeout=30):
+    if await approvals.next(timeout=180):
         return await ctx.call(DOUBLE, first)
     return first
 

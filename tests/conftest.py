@@ -22,6 +22,12 @@ def pytest_runtest_makereport(item, call):
     report = (yield).get_result()
     if report.skipped:
         item.session.skipped_reports += 1
+    if report.failed:
+        # Preserve the original failure even if asynchronous resource teardown
+        # subsequently stalls or the process-level watchdog terminates pytest.
+        terminal = item.config.pluginmanager.get_plugin("terminalreporter")
+        if terminal is not None:
+            terminal.write_line(str(report.longrepr))
 
 
 def pytest_sessionfinish(session, exitstatus):
