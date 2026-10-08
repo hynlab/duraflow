@@ -20,6 +20,7 @@ proof over every possible distributed execution.
 | W01 | `test_message_worker_edges.py` | Malformed task contracts cannot execute; duplicates during a live lease do not execute twice; cancellation, heartbeat loss, and stale generations cannot commit success. |
 | E01 | `test_message_engine_edges.py` | Cross-namespace/topic injection is rejected; an invalid replay decision rolls back even earlier valid task intents; recorded time/UUID and cross-workflow signals survive replay. |
 | E02 | `test_message_replay_contract.py` | Unsupported codec/protocol/build, shortened/changed history, exceptions before committed history, and operation budgets reject divergent replay. |
+| E03 | `test_message_rollback_identity.py` | Restore workflow journal state while retaining broker traffic; stale replay responses arriving before/after the new activation cannot suppress its completion. |
 | L01 | `test_message_lifecycle_edges.py` | Schedule/overall/attempt deadlines fence late results; retry exhaustion retains effect keys; parent controls cancel children; compensation, waiter cancellation, namespace isolation, and invalid delegation. |
 | T01 | `test_message_tag_recovery.py` | Replacement after page commit resumes cancellation fan-out; duplicate/old controls cannot reschedule pages; closed task IDs do not reappear. |
 | M01 | `test_message_stateful.py` | Independent reference model generates deliveries, conflicting identities, rollback, time advances, claims, release, and stale completion on Memory/SQLite. Hypothesis saves/shrinks failures. |

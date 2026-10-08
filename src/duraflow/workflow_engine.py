@@ -88,8 +88,10 @@ class Transition:
             kind,
             key or self.message.key,
             clone(body),
-            id=identity(self.message.key, f"message/{self.aggregate['emitted']}"),
         )
+        # Allocate a new timeline identity inside the state/outbox transaction.
+        # Once committed, relay retries retain this exact envelope. Deriving it
+        # from a counter would reuse discarded messages after database rollback.
         target = topic or self.topics.workflow(self.aggregate["workflow"])
         if deliver_at is not None and topic is None:
             target, subscription = self.topics.topic("timer", self.aggregate["workflow"]), "timers"
@@ -111,7 +113,7 @@ class Transition:
         if self.aggregate.get("active") or state["status"] in TERMINAL | {"BLOCKED", "CANCELLING"}:
             return
         self.aggregate["activation_count"] = self.aggregate.get("activation_count", 0) + 1
-        activation_id = identity(state["run_id"], f"activation/{self.aggregate['activation_count']}")
+        activation_id = str(uuid4())
         self.aggregate["active"] = {"id": activation_id, "run_id": state["run_id"]}
         self.emit(
             "activate",
