@@ -1,40 +1,76 @@
 # Duraflow
 
-An independent **Apache-2.0** Python durable workflow engine. Write orchestration
-as ordinary `async def` functions; execute business functions through typed task
-references. Completed results are recorded and replayed after a restart.
+**Durable workflows for Python, backed by PostgreSQL and Apache Pulsar.**
 
-**Status: 0.1.0a1, alpha.** Core behavior and file-backed process recovery are
-tested. Native PostgreSQL/Pulsar qualification is a separate integration gate;
-this is not a claim of production readiness or exactly-once external effects.
-See [implementation status](docs/implementation_status.md).
+[![CI](https://github.com/hynlab/duraflow/actions/workflows/ci.yml/badge.svg)](https://github.com/hynlab/duraflow/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-## Install from this repository
+Write workflows as Python `async` functions. Duraflow records their progress,
+dispatches tasks to workers, and replays committed results so execution can
+continue after a process restart.
 
-Python 3.12 or newer is required. Native broker wheels have their own platform
-support; the integration baseline is Linux x86_64 / Python 3.12.
+Use it to coordinate background jobs, join results from multiple services, or
+build long-running processes that wait for timers and external signals.
+
+## Features
+
+- **Python-native orchestration** — typed tasks, sequential steps, parallel joins,
+  races, and child workflows.
+- **Durable progress** — recorded results, persistent timers, buffered signals,
+  and execution rollover.
+- **Distributed workers** — PostgreSQL stores workflow state; Apache Pulsar
+  delivers tasks and business events.
+- **Broadcast and join** — publish once and wait for a declared set of handlers.
+- **Failure handling** — retry policies, deadlines, execution leases, and stable
+  task idempotency keys.
+- **Local development** — an in-memory test environment, SQLite storage, and
+  runnable examples without external services.
+- **Operational tools** — CLI inspection and controls, readiness probes,
+  Prometheus metrics, and dead-letter inspection.
+
+Duraflow is currently **alpha**. APIs and storage formats may evolve; see the
+[operations guide](guide/operations.md) for execution and recovery considerations.
+
+## Installation
+
+Requires **Python 3.12+**. To use the version documented in this repository:
 
 ```bash
-python -m pip install -e '.[dev,postgres,pulsar]'
-python examples/quickstart.py
-python examples/broadcast_join.py
-make test
+git clone https://github.com/hynlab/duraflow.git
+cd duraflow
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-No PyPI publication or package-name ownership is implied by the project name.
+For PostgreSQL and Pulsar support, install the optional adapters:
 
-## A workflow
+```bash
+python -m pip install -e '.[postgres,pulsar]'
+```
+
+See [Getting started](guide/getting-started.md) for environment setup and examples.
+
+## Quick start
+
+This complete example runs locally without a database or broker:
 
 ```python
+import asyncio
+
 from duraflow import Registry, TaskRef, WorkflowContext, task, workflow
+from duraflow.testing import TestEnvironment
 
 DOUBLE = TaskRef("double", int, int)
+
 
 @task(ref=DOUBLE)
 def double(value: int) -> int:
     return value * 2
 
-@workflow(name="example", version=1, build_id="example-release-1")
+
+@workflow(name="example", version=1, build_id="example-v1")
 async def example(ctx: WorkflowContext, value: int) -> int:
     first, second = await ctx.gather(
         ctx.call(DOUBLE, value),
@@ -42,84 +78,68 @@ async def example(ctx: WorkflowContext, value: int) -> int:
     )
     return first + second
 
-registry = Registry(example, double)
+
+async def main() -> None:
+    async with TestEnvironment(Registry(example, double)) as env:
+        handle = await env.client.start(example, 5, request_id="demo-1")
+        print(await env.run(handle))  # 22
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-Calling `double(2)` remains an ordinary local function call. Only
-`ctx.call(DOUBLE, 2)` denotes remote work. A workflow imports contracts, not worker
-implementations. `build_id` must identify the complete immutable implementation,
-including helper code; a source-derived default cannot detect changed imports.
+Workflows describe **what should happen**; tasks perform the actual work, such as
+API calls or database writes. `ctx.call()` schedules a durable task, while calling
+a decorated task function directly remains an ordinary Python call.
 
-## One message, three subscriptions, one join
-
-```python
-results = await ctx.broadcast(
-    PRODUCT_READY,
-    product,
-    handlers=(PRICE_HANDLER, SHIPPING_HANDLER, DEMAND_HANDLER),
-)
-await ctx.publish(READY_FOR_ANALYSIS, product)
-```
-
-The declared participant set is saved before publishing. Three duplicate
-completions from the price handler still count as **one** participant. The worker
-runner handles completion reporting automatically. Only the failed handler is
-retried; successful participants are not broadcast again. Handler subscriptions
-are namespace-scoped, while replicas of one handler share its subscription.
-
-## Included capabilities
-
-- Deterministic coroutine replay, version/codec pinning, typed boundaries,
-  sequential calls, parallel joins, race, and recorded time/UUID values.
-- Transactional starts, run revisions, inbox/outbox, fenced execution leases,
-  automatic results, retry/deadline policies and stable business idempotency keys.
-- Persistent timers, buffered typed signals, audited cancel/terminate/resume,
-  child workflows, execution rollover, tags and delegated external completion.
-- Memory, SQLite development/recovery, PostgreSQL adapters; memory and official
-  Pulsar transports; SDK, CLI, examples, CI and fault/recovery tests.
-
-## Run distributed processes
+Run the included examples:
 
 ```bash
-docker compose up -d
-export DURAFLOW_DATABASE_URL='postgresql+psycopg://duraflow:development-only@localhost:5432/duraflow'
-export DURAFLOW_PULSAR_URL='pulsar://localhost:6650'
-python -m duraflow --app examples.application init
-# Separate terminals/processes:
-python -m duraflow --app examples.application engine
-python -m duraflow --app examples.application worker
-python -m duraflow --app examples.application start product:v1 --input '7' --request-id example-1
+python examples/quickstart.py
+python examples/broadcast_join.py
 ```
 
-The compose environment is **local development only**, with loopback ports and
-an explicit development password. Production needs TLS/authentication, backups,
-supervision and infrastructure availability engineering.
+## How it works
 
-## Important boundaries
+```text
+Client ──► PostgreSQL ◄── Engine ──► Pulsar ──► Workers
+               ▲                                 │
+               └────── recorded task results ─────┘
+```
 
-Workflow code is trusted, deterministic orchestration: no HTTP, database access,
-live environment decisions, ordinary asyncio concurrency, or external effects.
-Put those in tasks. Durable operations spanning a suspended `finally` or async
-context-manager exit are unsupported and rejected when encountered. Python code
-is not sandboxed; a pure infinite loop can still block an engine process.
+The engine reconstructs a workflow from its recorded history and schedules its
+next steps. Workers execute tasks and persist results. Completed task results
+are reused during replay. Tasks that lose their result before it is committed
+may execute again, so external effects should use the task's idempotency key.
 
-External effects may run again after a crash between the effect and result
-persistence. Pass `TaskContext.idempotency_key` to systems that support it.
-Cancellation cannot kill arbitrary Python threads or undo already performed
-side effects. `publish` confirms broker acceptance, not consumer business success.
+## Guides
 
-The alpha PostgreSQL implementation commits **one JSON aggregate per run**, with
-CAS revisions. This simplifies atomic inbox/history/outbox updates, but has JSON
-write amplification and scan-based reconciliation. It is not a high-throughput
-claim, and materialized state does not replace replay history.
+| Guide | What you'll learn |
+| --- | --- |
+| [Getting started](guide/getting-started.md) | Install Duraflow and run your first workflow |
+| [Writing workflows](guide/workflows.md) | Tasks, retries, timers, signals, children, and replay |
+| [Broadcast and join](guide/broadcast-and-join.md) | Coordinate multiple handlers from one event |
+| [Running distributed services](guide/distributed.md) | Start PostgreSQL, Pulsar, engines, and workers |
+| [Operations](guide/operations.md) | Configure services, inspect runs, and manage recovery |
+| [Testing and contributing](guide/testing.md) | Test workflows, run repository checks, and contribute |
 
-## Documentation
+Browse the [guide index](guide/README.md) for a suggested reading order.
 
-[API and execution semantics](docs/architecture.md) ·
-[Operations and recovery](docs/operations.md) ·
-[Acceptance and release status](docs/implementation_status.md) ·
-[Original planning baseline](docs/specification.md) ·
-[Independent implementation policy](PROVENANCE.md)
+## Contributing
 
-Infinitic was a high-level architectural reference only. This repository is not
-an official Python edition and does not promise JVM wire/storage compatibility.
+Bug reports, documentation improvements, and pull requests are welcome.
+Please include a reproducible example when [reporting an issue](https://github.com/hynlab/duraflow/issues).
+
+```bash
+python -m pip install -e '.[dev,postgres]'
+make check
+```
+
+See [Testing and contributing](guide/testing.md) for integration tests and the
+development workflow.
+
+## License
+
+Duraflow is licensed under the [Apache License 2.0](LICENSE).
+See [PROVENANCE.md](PROVENANCE.md) for implementation provenance.
