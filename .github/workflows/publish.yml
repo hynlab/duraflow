@@ -33,6 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -44,6 +45,7 @@ jobs:
         run: |
           python - <<'PY'
           import os
+          import subprocess
           import tomllib
           from pathlib import Path
           project = tomllib.loads(Path('pyproject.toml').read_text())['project']
@@ -59,6 +61,10 @@ jobs:
               raise SystemExit('Release request must match duraflow and its exact package version')
           if project['license'] != 'Apache-2.0':
               raise SystemExit('Unexpected package license')
+          def commit(ref):
+              return subprocess.check_output(['git', 'rev-parse', '--verify', ref], text=True).strip()
+          if commit('HEAD') != commit(f'refs/tags/v{version}^{{commit}}'):
+              raise SystemExit('Release tag must point to the exact commit being published')
           print(f'Preparing duraflow=={version}; this does not imply publication')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'version={version}\n')

@@ -147,6 +147,8 @@ class TestEnvironment:
             previous = current
         raise TimeoutError("Message harness exceeded its step limit")
 
-    async def run(self, handle: Any, *, steps: int = 100) -> Any:
+    async def run(self, handle: Any, *, steps: int = 100, timeout: float = 10) -> Any:
         await self.drain(steps=steps)
-        return await handle.result(timeout=2)
+        # Synchronous tasks use real executor threads even with a manual clock.
+        # Allow scheduling headroom on shared CI runners after broker quiescence.
+        return await handle.result(timeout=timeout)
