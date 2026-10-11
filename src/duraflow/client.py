@@ -10,8 +10,10 @@ from uuid import uuid4
 from .channels import ChannelRef
 from .contracts import (
     Archived,
+    Clock,
     Conflict,
     NotFound,
+    ProtocolError,
     Registry,
     WorkflowBlocked,
     WorkflowFailed,
@@ -23,6 +25,7 @@ from .contracts import (
 from .messaging import Message, Topics
 from .state import identity
 from .transport import Transport
+from .retention import MESSAGE_HORIZON
 
 
 class Client:
@@ -35,17 +38,24 @@ class Client:
         topics: Topics | None = None,
         client_id: str | None = None,
         timeout: float = 30,
+        clock: Clock | None = None,
     ):
         self.transport, self.registry = transport, registry or Registry()
         self.topics = topics or Topics(namespace=namespace)
         self.id = client_id or str(uuid4())
         self.timeout = timeout
+        self.clock = clock or Clock()
         self.replies: dict[str, dict[str, Any]] = {}
         self.lock = asyncio.Lock()
         self.pending: set[str] = set()
         self.closed = False
+        self.cleanup_lock = asyncio.Lock()
+        self.cleaned = False
 
     async def _send(self, topic: str, message: Message) -> None:
+        from dataclasses import replace
+
+        message = replace(message, body={"_df_expires_at": self.clock.now() + MESSAGE_HORIZON, **message.body})
         await self.transport.publish(topic, message.to_bytes(), {}, key=message.key)
 
     def _contract(self, workflow: Any) -> tuple[WorkflowRef[Any, Any], dict[str, Any]]:
@@ -71,7 +81,6 @@ class Client:
         if self.closed:
             raise RuntimeError("Client is closed")
         reply_to = self.topics.reply(self.id)
-        await self.transport.ensure(reply_to, "client")
         message = Message(
             kind,
             self.topics.instance(workflow, workflow_id),
@@ -79,6 +88,9 @@ class Client:
         )
         self.pending.add(correlation_id)
         try:
+            await self.transport.ensure(reply_to, "client")
+            if self.closed:
+                raise RuntimeError("Client is closed")
             target = self.topics.control(workflow) if kind == "control" else self.topics.commands(workflow)
             await self._send(topic or target, message)
             async with asyncio.timeout(self.timeout if timeout is None else timeout):
@@ -116,9 +128,16 @@ class Client:
                     logging.getLogger("duraflow.messages").warning(
                         "publication_failed", extra={"error_type": type(exc).__name__}
                     )
+            if self.closed and not self.pending:
+                await self._cleanup()
         error = reply.get("error")
         if error:
-            raise {"NotFound": NotFound, "Conflict": Conflict, "Archived": Archived}.get(error, WorkflowFailed)(error)
+            raise {
+                "NotFound": NotFound,
+                "Conflict": Conflict,
+                "Archived": Archived,
+                "ProtocolError": ProtocolError,
+            }.get(error, WorkflowFailed)(error)
         return reply.get("value")
 
     async def dispatch(
@@ -192,13 +211,22 @@ class Client:
         *,
         signal_id: str,
         payload_type: Any = None,
+        signal_epoch: int | None = None,
     ) -> Any:
         return await self.get_handle(workflow, workflow_id).signal(
-            channel, value, signal_id=signal_id, payload_type=payload_type
+            channel, value, signal_id=signal_id, payload_type=payload_type, signal_epoch=signal_epoch
         )
 
     async def signal_tagged(
-        self, workflow: Any, tag: str, channel: ChannelRef[Any], value: Any, *, signal_id: str, payload_type: Any = None
+        self,
+        workflow: Any,
+        tag: str,
+        channel: ChannelRef[Any],
+        value: Any,
+        *,
+        signal_id: str,
+        payload_type: Any = None,
+        signal_epoch: int | None = None,
     ) -> None:
         ref = workflow if isinstance(workflow, WorkflowRef) else self._contract(workflow)[0]
         from .contracts import name
@@ -219,6 +247,7 @@ class Client:
                 "payload_schema": schema_id(channel.payload_type if payload_type is None else payload_type),
                 "payload": encoded,
                 "signal_id": signal_id,
+                **({"signal_epoch": signal_epoch} if signal_epoch is not None else {}),
             },
         )
         await self._send(self.topics.tags(), message)
@@ -227,7 +256,7 @@ class Client:
         self, token: str, value: Any = None, *, ref: Any, error: dict[str, Any] | None = None
     ) -> bool:
         import base64
-        from .contracts import parse_json
+        from .contracts import parse_json, validate_task_error
 
         try:
             body = parse_json(base64.urlsafe_b64decode(token))
@@ -235,6 +264,8 @@ class Client:
                 raise ValueError()
         except Exception:
             raise ValueError("Invalid external completion token") from None
+        if error is not None:
+            error = validate_task_error(error)
         return bool(
             await self.request(
                 "external",
@@ -248,9 +279,16 @@ class Client:
     async def close(self) -> None:
         """Close the reply subscription after outstanding requests have finished."""
         self.closed = True
-        self.replies.clear()
         if not self.pending:
-            await self.transport.unsubscribe(self.topics.reply(self.id), "client")
+            await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        async with self.cleanup_lock:
+            if not self.cleaned:
+                async with self.lock:
+                    await self.transport.unsubscribe(self.topics.reply(self.id), "client")
+                self.replies.clear()
+                self.cleaned = True
 
     async def cancel_tasks_tagged(self, ref: Any, tag: str, *, request_id: str) -> None:
         from .contracts import name, canonical
@@ -319,7 +357,15 @@ class WorkflowHandle:
         async with asyncio.timeout(timeout):
             return await wait()
 
-    async def signal(self, channel: ChannelRef[Any], value: Any, *, signal_id: str, payload_type: Any = None) -> Any:
+    async def signal(
+        self,
+        channel: ChannelRef[Any],
+        value: Any,
+        *,
+        signal_id: str,
+        payload_type: Any = None,
+        signal_epoch: int | None = None,
+    ) -> Any:
         if not signal_id or len(signal_id) > 256:
             raise ValueError("Invalid signal ID")
         encoded = encode(value, channel.payload_type if payload_type is None else payload_type)
@@ -335,6 +381,7 @@ class WorkflowHandle:
                 "payload_schema": schema_id(channel.payload_type if payload_type is None else payload_type),
                 "payload": encoded,
                 "signal_id": signal_id,
+                **({"signal_epoch": signal_epoch} if signal_epoch is not None else {}),
             },
         )
 

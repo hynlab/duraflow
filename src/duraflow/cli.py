@@ -66,6 +66,9 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--after", default="")
     listing.add_argument("--limit", type=int, default=100)
     listing.add_argument("--tag", action="append", default=[])
+    gc = commands.add_parser("gc", help="Inspect or collect expired protocol-2 records")
+    gc.add_argument("--limit", type=int, default=1000)
+    gc.add_argument("--apply", action="store_true", help="Delete eligible records (default: dry run)")
     start = commands.add_parser("start")
     start.add_argument("workflow", help="Registered name:vN")
     start.add_argument("--input", required=True, help="JSON input")
@@ -96,6 +99,7 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("channel")
             sub.add_argument("--input", required=True)
             sub.add_argument("--signal-id", required=True)
+            sub.add_argument("--signal-epoch", type=int, help="Persist and reuse this UTC-day epoch on retries")
         if command in {"cancel", "terminate", "resume", "retry", "archive"}:
             sub.add_argument("--actor", required=True)
             sub.add_argument("--reason", required=True)

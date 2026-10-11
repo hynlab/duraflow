@@ -57,13 +57,39 @@ async def test_message_schema_upgrade_preserves_rows_and_rolls_back_on_failure(f
         assert await store.claim("other") == []
         await store.delivered(outgoing.message.id, "owner")
         async with store.database._transaction() as conn:
-            assert (await conn.execute(text(f'SELECT version FROM "{schema}".schema_version'))).scalar_one() == 2
+            assert (await conn.execute(text(f'SELECT version FROM "{schema}".schema_version'))).scalar_one() == 4
             assert (
                 await conn.execute(text(f'SELECT pg_typeof(document)::text FROM "{schema}".states'))
             ).scalar_one() == "json"
             await conn.execute(text(f'UPDATE "{schema}".schema_version SET version=999'))
         with pytest.raises(Conflict):
             await store.initialize()
+    finally:
+        async with store.database._transaction() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await store.close()
+
+
+@pytest.mark.parametrize("version", [2, 3])
+async def test_telemetry_upgrade_backfills_existing_heads_without_changing_history(version):
+    from sqlalchemy import text
+
+    schema = "telemetry_migration_" + uuid4().hex[:12]
+    store = PostgresMessageStore(os.environ["DURAFLOW_TEST_POSTGRES"], schema=schema)
+    state = {"current": "run", "runs": {"run": {"namespace": "review", "status": "WAITING", "result": -0.0}}}
+    try:
+        await store.initialize()
+        await store.apply("key", Message("seed", "key", {}), lambda s, now: s.update(state) or [])
+        async with store.database._transaction() as conn:
+            for table, column in (("states", "namespace"), ("states", "status"), ("outbox", "created_at")):
+                await conn.execute(text(f'ALTER TABLE "{schema}".{table} DROP COLUMN {column}'))
+            if version == 2:
+                for table, column in (("states", "expires_at"), ("inbox", "expires_at"), ("outbox", "state_key")):
+                    await conn.execute(text(f'ALTER TABLE "{schema}".{table} DROP COLUMN {column}'))
+            await conn.execute(text(f'UPDATE "{schema}".schema_version SET version=:version'), {"version": version})
+        await store.initialize()
+        assert await store.read("key") == state
+        assert (await store.telemetry("review"))["statuses"] == {"WAITING": 1}
     finally:
         async with store.database._transaction() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

@@ -60,6 +60,12 @@ handle = client.get_handle(ORDER, "order-42")
 await handle.signal(APPROVAL, True, signal_id="approval-42")
 ```
 
+For workflows that continue indefinitely, pass `signal_epoch` as well. Persist
+the event's UTC-day epoch with its ID and reuse both on retries, including after
+midnight. Epoch-less signals preserve the original permanent dedup behavior and
+10,000-ID chain limit; epoch-aware signals use the bounded retry contract in
+[long-running workflows](../docs/long-running-workflows.md#stable-signal-epochs).
+
 Run this inside an async function with a configured transport. The sender needs
 only the contracts and broker credentials. Targeting the logical workflow follows
 rollover; supplying `run_id=` to `get_handle()` pins a specific history.

@@ -96,7 +96,7 @@ class TestEnvironment:
         self.store = store or MemoryMessageStore(clock=self.clock)
         self.journal = journal or MemoryMessageStore(clock=self.clock)
         self.transport = MemoryBroker(clock=self.clock)
-        self.client = BrokerClient(self.transport, registry, topics=self.topics)
+        self.client = BrokerClient(self.transport, registry, topics=self.topics, clock=self.clock)
         self.engine = WorkflowEngine(self.store, self.transport, registry, topics=self.topics)
         self.workflows = WorkflowWorker(self.transport, registry, topics=self.topics)
         self.worker = TaskWorker(

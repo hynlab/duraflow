@@ -30,6 +30,7 @@ async def supervise(
     close_resources: bool = True,
 ) -> None:
     health = HealthState()
+    health.telemetry_max_age = settings.probe_interval + 2 * settings.probe_timeout
     runtime.health = health
     runtime.accepting, runtime.draining = False, False
     probes = ProbeServer(health, runtime, role, max_age=settings.probe_interval + 2 * settings.probe_timeout)
@@ -48,8 +49,11 @@ async def supervise(
             if telemetry is not None:
                 try:
                     health.stats = await asyncio.wait_for(telemetry(settings.namespace), settings.probe_timeout)
+                    health.telemetry_available = True
+                    health.telemetry_checked_at = time.monotonic()
                 except Exception:
-                    pass
+                    health.telemetry_available = False
+                    health.telemetry_failures += 1
             try:
                 await asyncio.wait_for(stop.wait(), settings.probe_interval)
             except TimeoutError:

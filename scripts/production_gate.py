@@ -6,6 +6,9 @@ from pathlib import Path
 
 CRITICAL = ("coordinator.py", "state.py", "replay.py", "runner.py")
 MESSAGE_CRITICAL = (
+    "message_records.py",
+    "workflow_signals.py",
+    "workflow_snapshot.py",
     "message_store.py",
     "message_postgres.py",
     "message_runtime.py",

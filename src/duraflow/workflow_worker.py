@@ -64,7 +64,12 @@ class WorkflowWorker(Consumer):
         response = Message(
             "activation_result",
             message.key,
-            {"run_id": state["run_id"], "activation_id": body["activation_id"], **result},
+            {
+                "run_id": state["run_id"],
+                "activation_id": body["activation_id"],
+                **result,
+                **({"_df_expires_at": body["_df_expires_at"]} if "_df_expires_at" in body else {}),
+            },
             id=identity(message.id, "result"),
         )
         await self.transport.publish(body["reply_to"], response.to_bytes(), {}, key=message.key)

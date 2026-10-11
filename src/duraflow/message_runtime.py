@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import uuid4
 
 from .contracts import ProtocolError, canonical
@@ -19,8 +20,17 @@ class OutboxRelay:
     def __init__(self, store: MessageStore, transport: Transport):
         self.store, self.transport = store, transport
         self.owner = str(uuid4())
+        self.next_gc = time.monotonic() + 600
+        self.gc_totals = {"records": 0, "inbox": 0, "states": 0}
 
     async def step(self) -> int:
+        if time.monotonic() >= self.next_gc:
+            self.next_gc = time.monotonic() + 600
+            collected = await self.store.collect_garbage(limit=1000, dry_run=False)
+            for key, value in collected.items():
+                self.gc_totals[key] += value
+            if any(value >= 1000 for value in collected.values()):
+                self.next_gc = time.monotonic() + 1
         items = await self.store.claim(self.owner)
         for item in items:
             try:
@@ -38,7 +48,17 @@ class OutboxRelay:
                 await self.transport.publish(item.topic, data, properties, key=message.key, deliver_at=item.deliver_at)
                 if business and "confirmation" in message.body:
                     response = Message(
-                        "published", message.key, message.body["confirmation"], id=identity(message.id, "published")
+                        "published",
+                        message.key,
+                        {
+                            **message.body["confirmation"],
+                            **(
+                                {"_df_expires_at": message.body["_df_expires_at"]}
+                                if "_df_expires_at" in message.body
+                                else {}
+                            ),
+                        },
+                        id=identity(message.id, "published"),
                     )
                     await self.transport.publish(message.body["reply_to"], response.to_bytes(), {}, key=message.key)
                 await self.store.delivered(message.id, self.owner)
@@ -56,7 +76,7 @@ class Consumer:
             raise ValueError("Invalid consumer concurrency")
         self.transport, self.topics, self.concurrency = transport, topics, concurrency
         self.routes: list[tuple[str, str, bool]] = []
-        self.cursor = 0
+        self.cursors: dict[tuple[tuple[str, str, bool], ...], int] = {}
         self.accepting, self.draining = True, False
         self.metrics = {"messages": 0, "errors": 0}
 
@@ -91,12 +111,17 @@ class Consumer:
         raise NotImplementedError
 
     async def step(self) -> bool:
+        return await self.consume(self.routes)
+
+    async def consume(self, routes: list[tuple[str, str, bool]]) -> bool:
         if self.draining or not self.accepting:
             return False
         await self.prepare()
-        for _ in range(len(self.routes)):
-            route = self.routes[self.cursor % len(self.routes)]
-            self.cursor += 1
+        lane = tuple(routes)
+        for _ in range(len(routes)):
+            cursor = self.cursors.get(lane, 0)
+            route = routes[cursor % len(routes)]
+            self.cursors[lane] = cursor + 1
             delivery = await self.transport.receive(route[0], route[1])
             if delivery is not None:
                 await self.process(delivery)
@@ -104,10 +129,10 @@ class Consumer:
         return False
 
     async def run(self, stop: asyncio.Event, *, poll_interval: float = 0.05) -> None:
-        async def loop() -> None:
+        async def loop(control: bool = False) -> None:
             while not stop.is_set():
                 try:
-                    worked = await self.step()
+                    worked = await (self.control_step() if control else self.execution_step())
                 except Exception as exc:
                     log.error("consumer_iteration_failed", extra={"error_type": type(exc).__name__})
                     worked = False
@@ -122,6 +147,16 @@ class Consumer:
         async with asyncio.TaskGroup() as tasks:
             for _ in range(self.concurrency):
                 tasks.create_task(loop())
+            if self.has_control_lane:
+                tasks.create_task(loop(control=True))
+
+    has_control_lane = False
+
+    async def execution_step(self) -> bool:
+        return await self.step()
+
+    async def control_step(self) -> bool:
+        return False
 
     async def close(self) -> None:
         pass

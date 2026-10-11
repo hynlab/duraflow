@@ -45,6 +45,25 @@ class ProtocolError(DuraflowError):
     pass
 
 
+class MessageIntegrityError(ProtocolError, Conflict):
+    """A consumed message identity was reused with different wire content."""
+
+
+class MessageSizeLimit(DuraflowError):
+    """An internally generated publication exceeds the wire budget."""
+
+
+def validate_task_error(error: Any) -> dict[str, Any]:
+    if (
+        not isinstance(error, dict)
+        or not isinstance(error.get("code"), str)
+        or not error["code"]
+        or not isinstance(error.get("message"), str)
+    ):
+        raise ProtocolError("Remote errors require string code/message fields")
+    return TaskFailure(error).error
+
+
 class NonDeterminism(ProtocolError):
     pass
 

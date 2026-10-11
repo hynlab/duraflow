@@ -6,15 +6,14 @@ import asyncio
 import json
 import sqlite3
 from contextlib import closing
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from .contracts import Clock, Conflict, canonical, fingerprint
+from .contracts import Clock, Conflict, MessageIntegrityError, canonical, fingerprint
 from .messaging import Message, Publication
 from .storage import clone
-
-Update = Callable[[dict[str, Any], float], list[Publication]]
+from .message_records import LocalUpdate, Records, Update, apply_update
+from .message_telemetry import head_status, sample
 
 
 class MessageStore(Protocol):
@@ -26,6 +25,8 @@ class MessageStore(Protocol):
     async def release(self, message_id: str, owner: str) -> None: ...
     async def ping(self) -> bool: ...
     async def close(self) -> None: ...
+    async def collect_garbage(self, *, limit: int = 100, dry_run: bool = True) -> dict[str, int]: ...
+    async def telemetry(self, namespace: str) -> dict[str, Any]: ...
 
 
 class MemoryMessageStore:
@@ -33,19 +34,26 @@ class MemoryMessageStore:
         self.clock = clock or Clock()
         self.documents: dict[str, dict[str, Any]] = {}
         self.inbox: dict[tuple[str, str], str] = {}
+        self.inbox_expiry: dict[tuple[str, str], float] = {}
         self.outbox: dict[str, dict[str, Any]] = {}
+        self.records: dict[tuple[str, str], tuple[dict[str, Any], float | None]] = {}
         self.lock = asyncio.Lock()
+        self.heads: dict[str, tuple[str | None, str | None]] = {}
 
     async def apply(self, key: str, message: Message, update: Update) -> bool:
         async with self.lock:
+            message.admit(self.clock.now())
+            if isinstance(update, LocalUpdate) and not update.create and key not in self.documents:
+                return False
             digest = fingerprint(json.loads(message.to_bytes()))
-            previous = self.inbox.get((key, message.id))
+            previous = self.inbox.get((key, message.id)) if not isinstance(update, LocalUpdate) else None
             if previous is not None:
                 if previous != digest:
-                    raise Conflict("Message ID reused with different content")
+                    raise MessageIntegrityError("Message ID reused with different content")
                 return False
             state = clone(self.documents.get(key, {}))
-            outgoing = update(state, self.clock.now())
+            records = Records(lambda name: self.records.get((key, name), (None, None))[0])
+            outgoing = apply_update(update, state, self.clock.now(), records)
             pending: dict[str, dict[str, Any]] = {}
             for item in outgoing:
                 item.message.to_bytes()
@@ -58,10 +66,60 @@ class MemoryMessageStore:
                     raise Conflict("Outgoing identity conflict")
                 pending[item.message.id] = document
             self.documents[key] = clone(state)
-            self.inbox[key, message.id] = digest
+            self.heads[key] = head_status(state)
+            for name, value in records.writes.items():
+                self.records[key, name] = clone(value[0]), value[1]
+            if not isinstance(update, LocalUpdate):
+                self.inbox[key, message.id] = digest
+                expires_at = message.expires_at()
+                if expires_at is not None:
+                    self.inbox_expiry[key, message.id] = expires_at
             for message_id, document in pending.items():
-                self.outbox.setdefault(message_id, {"publication": document, "owner": None, "until": 0})
+                self.outbox.setdefault(
+                    message_id,
+                    {"publication": document, "owner": None, "until": 0, "key": key, "created_at": self.clock.now()},
+                )
             return True
+
+    async def telemetry(self, namespace: str) -> dict[str, Any]:
+        async with self.lock:
+            counts: dict[str, int] = {}
+            for ns, status in self.heads.values():
+                if ns == namespace and status is not None:
+                    counts[status] = counts.get(status, 0) + 1
+            oldest = min((item["created_at"] for item in self.outbox.values()), default=None)
+            return sample(self.clock.now(), counts, oldest)
+
+    async def collect_garbage(self, *, limit: int = 100, dry_run: bool = True) -> dict[str, int]:
+        if not 1 <= limit <= 10000:
+            raise ValueError("Invalid GC batch size")
+        async with self.lock:
+            now = self.clock.now()
+            pending = {item.get("key") for item in self.outbox.values()}
+            records = [
+                k
+                for k, (_, expiry) in self.records.items()
+                if expiry is not None and expiry <= now and k[0] not in pending
+            ][:limit]
+            inbox = [k for k, expiry in self.inbox_expiry.items() if expiry <= now and k[0] not in pending][:limit]
+            remaining_children = {k[0] for k in self.inbox if dry_run or k not in inbox} | {
+                k[0] for k in self.records if dry_run or k not in records
+            }
+            states = [
+                k
+                for k, state in self.documents.items()
+                if state.get("_gc_after", float("inf")) <= now and k not in pending and k not in remaining_children
+            ][:limit]
+            if not dry_run:
+                for key in records:
+                    del self.records[key]
+                for key in inbox:
+                    self.inbox.pop(key, None)
+                    del self.inbox_expiry[key]
+                for state_key in states:
+                    del self.documents[state_key]
+                    self.heads.pop(state_key, None)
+            return {"records": len(records), "inbox": len(inbox), "states": len(states)}
 
     async def read(self, key: str) -> dict[str, Any]:
         async with self.lock:
@@ -114,14 +172,42 @@ class SQLiteMessageStore:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS message_states(key TEXT PRIMARY KEY, document TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS message_schema_version(version INTEGER PRIMARY KEY);
-                INSERT OR IGNORE INTO message_schema_version VALUES(1);
+                INSERT INTO message_schema_version SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM message_schema_version);
                 CREATE TABLE IF NOT EXISTS message_inbox(key TEXT, id TEXT, digest TEXT NOT NULL, PRIMARY KEY(key,id));
                 CREATE TABLE IF NOT EXISTS message_outbox(id TEXT PRIMARY KEY, document TEXT NOT NULL,
                     owner TEXT, lease_until REAL NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS message_outbox_due ON message_outbox(lease_until);
+                CREATE TABLE IF NOT EXISTS message_records(
+                    key TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, expires_at REAL,
+                    PRIMARY KEY(key,name));
+                CREATE INDEX IF NOT EXISTS message_records_expiry ON message_records(expires_at);
             """)
             if conn.execute("SELECT version FROM message_schema_version").fetchall() != [(1,)]:
-                raise Conflict("Unsupported message-store schema version")
+                if conn.execute("SELECT version FROM message_schema_version").fetchall() not in ([(2,)], [(3,)]):
+                    raise Conflict("Unsupported message-store schema version")
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT version FROM message_schema_version").fetchall() == [(1,)]:
+                    conn.execute("ALTER TABLE message_states ADD COLUMN expires_at REAL")
+                    conn.execute("ALTER TABLE message_inbox ADD COLUMN expires_at REAL")
+                    conn.execute("ALTER TABLE message_outbox ADD COLUMN state_key TEXT")
+                    conn.execute("UPDATE message_schema_version SET version=2")
+                if conn.execute("SELECT version FROM message_schema_version").fetchall() == [(2,)]:
+                    conn.execute("ALTER TABLE message_states ADD COLUMN namespace TEXT")
+                    conn.execute("ALTER TABLE message_states ADD COLUMN status TEXT")
+                    conn.execute("ALTER TABLE message_outbox ADD COLUMN created_at REAL")
+                    conn.execute("UPDATE message_outbox SET created_at=?", (self.clock.now(),))
+                    for key, document in conn.execute("SELECT key,document FROM message_states").fetchall():
+                        conn.execute(
+                            "UPDATE message_states SET namespace=?,status=? WHERE key=?",
+                            (*head_status(json.loads(document)), key),
+                        )
+                    conn.execute("UPDATE message_schema_version SET version=3")
+                conn.execute("CREATE INDEX IF NOT EXISTS message_states_status ON message_states(namespace,status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS message_outbox_age ON message_outbox(created_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS message_states_expiry ON message_states(expires_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS message_inbox_expiry ON message_inbox(expires_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS message_outbox_state ON message_outbox(state_key)")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -134,32 +220,85 @@ class SQLiteMessageStore:
             try:
                 with conn:
                     conn.execute("BEGIN IMMEDIATE")
+                    message.admit(self.clock.now())
                     digest = fingerprint(json.loads(message.to_bytes()))
                     row = conn.execute(
                         "SELECT digest FROM message_inbox WHERE key=? AND id=?", (key, message.id)
                     ).fetchone()
-                    if row:
+                    if row and not isinstance(update, LocalUpdate):
                         if row[0] != digest:
-                            raise Conflict("Message ID reused with different content")
+                            raise MessageIntegrityError("Message ID reused with different content")
                         return False
                     row = conn.execute("SELECT document FROM message_states WHERE key=?", (key,)).fetchone()
+                    if row is None and isinstance(update, LocalUpdate) and not update.create:
+                        return False
                     state = json.loads(row[0]) if row else {}
-                    outgoing = update(state, self.clock.now())
-                    conn.execute("INSERT OR REPLACE INTO message_states VALUES(?,?)", (key, canonical(state)))
-                    conn.execute("INSERT INTO message_inbox VALUES(?,?,?)", (key, message.id, digest))
+
+                    def load(name: str) -> dict[str, Any] | None:
+                        found = conn.execute(
+                            "SELECT document FROM message_records WHERE key=? AND name=?", (key, name)
+                        ).fetchone()
+                        return json.loads(found[0]) if found else None
+
+                    records = Records(load)
+                    outgoing = apply_update(update, state, self.clock.now(), records)
+                    for name, (document, expires_at) in records.writes.items():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO message_records VALUES(?,?,?,?)",
+                            (key, name, canonical(document), expires_at),
+                        )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO message_states VALUES(?,?,?,?,?)",
+                        (key, canonical(state), state.get("_gc_after"), *head_status(state)),
+                    )
+                    if not isinstance(update, LocalUpdate):
+                        conn.execute(
+                            "INSERT INTO message_inbox VALUES(?,?,?,?)", (key, message.id, digest, message.expires_at())
+                        )
                     for item in outgoing:
                         item.message.to_bytes()
                         inserted = conn.execute(
-                            "INSERT INTO message_outbox(id,document) VALUES(?,?) "
+                            "INSERT INTO message_outbox(id,document,state_key,created_at) VALUES(?,?,?,?) "
                             "ON CONFLICT(id) DO UPDATE SET document=excluded.document "
                             "WHERE message_outbox.document=excluded.document RETURNING id",
-                            (item.message.id, canonical(item.document())),
+                            (item.message.id, canonical(item.document()), key, self.clock.now()),
                         ).fetchone()
                         if inserted is None:
                             raise Conflict("Outgoing identity conflict")
                     return True
             finally:
                 conn.close()
+
+        return await asyncio.to_thread(execute)
+
+    async def collect_garbage(self, *, limit: int = 100, dry_run: bool = True) -> dict[str, int]:
+        if not 1 <= limit <= 10000:
+            raise ValueError("Invalid GC batch size")
+
+        def execute() -> dict[str, int]:
+            with closing(self._connect()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                result = {}
+                for name in ("records", "inbox", "states"):
+                    table = "message_" + name
+                    children = (
+                        (
+                            " AND NOT EXISTS(SELECT 1 FROM message_inbox WHERE key=message_states.key)"
+                            " AND NOT EXISTS(SELECT 1 FROM message_records WHERE key=message_states.key)"
+                        )
+                        if name == "states"
+                        else ""
+                    )
+                    rows = conn.execute(
+                        f"SELECT rowid FROM {table} WHERE expires_at<=? AND NOT EXISTS "
+                        f"(SELECT 1 FROM message_outbox WHERE state_key={table}.key OR state_key IS NULL) "
+                        f"{children} ORDER BY expires_at LIMIT ?",
+                        (self.clock.now(), limit),
+                    ).fetchall()
+                    result[name] = len(rows)
+                    if not dry_run:
+                        conn.executemany(f"DELETE FROM {table} WHERE rowid=?", rows)
+                return result
 
         return await asyncio.to_thread(execute)
 
@@ -235,6 +374,20 @@ class SQLiteMessageStore:
     async def ping(self) -> bool:
         await self.read("health")
         return True
+
+    async def telemetry(self, namespace: str) -> dict[str, Any]:
+        def execute() -> dict[str, Any]:
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN")
+                counts = dict(
+                    conn.execute(
+                        "SELECT status,COUNT(*) FROM message_states WHERE namespace=? GROUP BY status", (namespace,)
+                    ).fetchall()
+                )
+                oldest = conn.execute("SELECT MIN(created_at) FROM message_outbox").fetchone()[0]
+                return sample(self.clock.now(), counts, oldest)
+
+        return await asyncio.to_thread(execute)
 
     async def close(self) -> None:
         pass

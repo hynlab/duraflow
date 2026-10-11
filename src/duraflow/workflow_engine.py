@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from .channels import SignalFilter
-from .contracts import Conflict, ProtocolError, Registry, TERMINAL, fingerprint, duration
-from .retention import RetentionPolicy
+from .contracts import Conflict, MessageSizeLimit, ProtocolError, Registry, TERMINAL, fingerprint, duration
+from .retention import DAY, RetentionPolicy
+from .workflow_signals import accept_signal, deliver_signal
+from .workflow_snapshot import preserve_results, summary
+from .message_records import Records, RecordUpdate
 from .transitions import collect, settle_task
 from .message_runtime import Consumer, OutboxRelay
 from .message_store import MessageStore
@@ -61,15 +63,67 @@ class Transition:
         topics: Topics,
         retention_policy: RetentionPolicy | None = None,
         max_commands: int = 1000,
+        records: Records | None = None,
     ):
         self.aggregate, self.message, self.now, self.topics = aggregate, message, now, topics
         self.outgoing: list[Publication] = []
         self.retention_policy = retention_policy or RetentionPolicy()
         self.max_commands = max_commands
+        self.records = records
+        if records is not None:
+            for state in aggregate.get("runs", {}).values():
+                for signal_id, digest in state.get("signal_keys", {}).items():
+                    key = "signal/" + fingerprint([None, signal_id])
+                    if records.get(key) is None:
+                        records.put(key, {"digest": digest, "legacy_digest": True})
+                        aggregate["legacy_signal_count"] = aggregate.get("legacy_signal_count", 0) + 1
+                state["signal_keys"] = {}
+
+    def run(self, run_id: str) -> dict[str, Any] | None:
+        state = self.aggregate.get("runs", {}).get(run_id)
+        if (state is None or state.get("_cold")) and self.records is not None:
+            stored = self.records.get("run/" + run_id)
+            if stored is not None:
+                state = stored
+                self.aggregate["runs"][run_id] = stored
+        return state
+
+    def persist_runs(self) -> None:
+        if self.records is None:
+            return
+        for run_id, state in list(self.aggregate.get("runs", {}).items()):
+            if state["status"] in TERMINAL and not state.get("_cold"):
+                self.records.put(
+                    "run/" + run_id,
+                    state,
+                    expires_at=state["finished_at"]
+                    + max(self.retention_policy.detail_retention, self.retention_policy.minimum_retention),
+                )
+                if run_id != self.aggregate["current"]:
+                    del self.aggregate["runs"][run_id]
+                else:
+                    tombstone = clone(state)
+                    tombstone.update(
+                        _cold=True,
+                        archived=True,
+                        input=None,
+                        result=None,
+                        error=None,
+                        commands=[],
+                        history=[],
+                        nodes={},
+                        channels={},
+                        signal_keys={},
+                        actions={},
+                    )
+                    tombstone.pop("carried_signals", None)
+                    self.aggregate["runs"][run_id] = tombstone
 
     @property
     def state(self) -> dict[str, Any]:
-        return self.aggregate["runs"][self.aggregate["current"]]
+        state = self.run(self.aggregate["current"])
+        assert state is not None
+        return state
 
     def emit(
         self,
@@ -84,6 +138,9 @@ class Transition:
         self.aggregate["emitted"] = self.aggregate.get("emitted", 0) + 1
         if deliver_at is not None:
             body = {**body, "not_before": deliver_at}
+        if kind == "signal":
+            body = {"signal_epoch": int(self.now // DAY), **body}
+        body = {"_df_expires_at": max(self.now, deliver_at or self.now) + self.retention_policy.message_horizon, **body}
         message = Message(
             kind,
             key or self.message.key,
@@ -179,7 +236,7 @@ class Transition:
 
     def query(self, body: dict[str, Any], *, result: bool = False) -> None:
         run_id = body.get("run_id") or self.aggregate.get("current")
-        state = self.aggregate.get("runs", {}).get(run_id)
+        state = self.run(run_id) if run_id is not None else None
         if state is None:
             if result and body.get("request_id") and not self.aggregate.get("runs"):
                 pending = self.aggregate.setdefault("early_queries", [])
@@ -209,13 +266,27 @@ class Transition:
             )
         else:
             self.respond(body, state)
+            if self.outgoing and self.outgoing[-1].message.kind == "response":
+                try:
+                    self.outgoing[-1].message.to_bytes()
+                except MessageSizeLimit:
+                    self.outgoing.pop()
+                    self.respond(body, summary(state))
 
-    def reserve_task(self, node: dict[str, Any]) -> None:
+    def reserve_task(self, node: dict[str, Any], *, publish: bool = True) -> None:
         state, current = self.state, node["attempts"][-1]
         ref = node["spec"]["ref"]
         dispatch_id = identity(state["run_id"], f"task/{node['id']}/{current['number']}")
         current["dispatch_id"] = dispatch_id
         current["dispatched"] = True
+        current["admission_deadline"] = max(self.now, current["not_before"]) + self.retention_policy.message_horizon
+        options = node["spec"]["options"]
+        deadlines = [
+            (base + options[setting], setting.upper())
+            for setting, base in (("overall_timeout", node["created_at"]), ("schedule_timeout", current["not_before"]))
+            if options[setting] is not None
+        ]
+        current["start_deadline"], current["start_deadline_code"] = min(deadlines) if deadlines else (None, None)
         body = {
             "run_id": state["run_id"],
             "node_id": node["id"],
@@ -228,16 +299,19 @@ class Transition:
             "reply_to": self.topics.workflow(self.aggregate["workflow"]),
             "workflow_key": self.message.key,
             "tags": node["spec"].get("tags", []),
+            "_df_expires_at": current["admission_deadline"],
+            "start_deadline": current["start_deadline"],
+            "start_deadline_code": current["start_deadline_code"],
         }
-        self.emit(
-            "execute_task",
-            body,
-            topic=self.topics.task(ref["name"], ref["version"]),
-            key=dispatch_id,
-            subscription="tasks",
-            deliver_at=current["not_before"] if current["not_before"] > self.now else None,
-        )
-        options = node["spec"]["options"]
+        if publish:
+            self.emit(
+                "execute_task",
+                body,
+                topic=self.topics.task(ref["name"], ref["version"]),
+                key=dispatch_id,
+                subscription="tasks",
+                deliver_at=current["not_before"] if current["not_before"] > self.now else None,
+            )
         for setting, base in (("overall_timeout", node["created_at"]), ("schedule_timeout", current["not_before"])):
             if options[setting] is not None:
                 self.emit(
@@ -272,10 +346,7 @@ class Transition:
             kind = member["kind"]
             if kind == "call":
                 node["task_id"], node["attempts"] = identity(state["run_id"], f"task/{node_id}"), [attempt(1, self.now)]
-                if spec["kind"] != "broadcast":
-                    self.reserve_task(node)
-                else:
-                    node["attempts"][0]["dispatch_id"] = identity(state["run_id"], f"task/{node_id}/1")
+                self.reserve_task(node, publish=spec["kind"] != "broadcast")
             elif kind == "sleep":
                 node["due_at"] = self.now + member["seconds"]
                 self.emit("timer", {"run_id": state["run_id"], "node_id": node_id}, deliver_at=node["due_at"])
@@ -286,11 +357,7 @@ class Transition:
                 state["channels"][stream_id] = {**member, "received": [], "accepted": 0}
                 carried = state.get("carried_signals", [])
                 for item in list(carried):
-                    if item["channel"] == member["channel"] and item["schema"] == member["schema"]:
-                        state["channels"][stream_id]["received"].append(
-                            {"id": item["id"], "payload": item["payload"], "consumed": False}
-                        )
-                        state["channels"][stream_id]["accepted"] += 1
+                    if deliver_signal(state["channels"][stream_id], item, item["id"]):
                         carried.remove(item)
                 finish_node(state, node, self.now)
             elif kind == "channel_next":
@@ -359,6 +426,9 @@ class Transition:
                     "node_id": node_id,
                     "task_id": state["nodes"][node_id]["task_id"],
                     "dispatch_id": state["nodes"][node_id]["attempts"][0]["dispatch_id"],
+                    "start_deadline": state["nodes"][node_id]["attempts"][0]["start_deadline"],
+                    "start_deadline_code": state["nodes"][node_id]["attempts"][0]["start_deadline_code"],
+                    "tags": member.get("tags", []),
                     "ref": member["ref"],
                 }
                 for member, node_id in zip(members, record["members"], strict=True)
@@ -395,57 +465,54 @@ class Transition:
             },
             self.now,
         )
-        new["signal_keys"] = clone(state["signal_keys"])
-        new["carried_signals"] = [
-            {"channel": channel["channel"], "schema": channel["schema"], "payload": item["payload"], "id": item["id"]}
+        if self.records is None:
+            new["signal_keys"] = clone(state["signal_keys"])
+        new["carried_signals"] = clone(state.get("carried_signals", [])) + [
+            {
+                "channel": channel["channel"],
+                "schema": channel["schema"],
+                "payload": item["payload"],
+                "id": item["id"],
+                "payload_schema": item.get("payload_schema"),
+            }
             for channel in state["channels"].values()
             for item in channel["received"]
             if not item["consumed"]
         ]
         finish_node(state, node, self.now)
         state["status"], state["finished_at"], state["continued_run_id"] = "CONTINUED", self.now, run_id
+        self.retire_tasks(state)
         self.aggregate["runs"][run_id] = new
         self.aggregate["current"] = run_id
 
+    def retire_tasks(self, state: dict[str, Any]) -> None:
+        for node in state["nodes"].values():
+            if node["spec"]["kind"] != "call":
+                continue
+            ref = node["spec"]["ref"]
+            for attempt_state in node["attempts"]:
+                if "dispatch_id" not in attempt_state:
+                    continue
+                self.emit(
+                    "retire_task",
+                    {
+                        "dispatch_id": attempt_state["dispatch_id"],
+                        "admission_deadline": attempt_state.get("admission_deadline"),
+                        "_df_expires_at": None,
+                        "retain_for": max(
+                            self.retention_policy.detail_retention, self.retention_policy.minimum_retention
+                        ),
+                    },
+                    topic=self.topics.task_control(ref["name"], ref["version"]),
+                    key=attempt_state["dispatch_id"],
+                    subscription="tasks",
+                )
+
     def signal(self, body: dict[str, Any]) -> None:
-        state = self.state
-        digest = fingerprint([body["channel"], body["schema"], body["payload"]])
-        previous = state["signal_keys"].get(body["signal_id"])
-        if previous is not None:
-            self.respond(body, error="Conflict" if previous != digest else None)
-            return
-        if state["status"] in TERMINAL:
-            self.respond(body, error="Conflict")
-            return
-        if len(state["signal_keys"]) >= 10000:
-            self.respond(body, error="SignalLimit")
-            return
-        state["signal_keys"][body["signal_id"]] = digest
-        accepted = 0
-        for stream in state["channels"].values():
-            if stream["channel"] != body["channel"] or stream["schema"] != body["schema"]:
-                continue
-            if stream["accepted_schema"] != stream["schema"] and stream["accepted_schema"] != body.get(
-                "payload_schema"
-            ):
-                continue
-            if stream["max_signals"] is not None and stream["accepted"] >= stream["max_signals"]:
-                continue
-            if not SignalFilter(stream["filter"]).matches(body["payload"]):
-                continue
-            if len(stream["received"]) >= 1000:
-                raise ProtocolError("Channel buffer capacity exceeded")
-            stream["accepted"] += 1
-            stream["received"].append({"id": body["signal_id"], "payload": body["payload"], "consumed": False})
-            accepted += 1
-        event(
-            state,
-            "signal_received" if accepted else "signal_discarded",
-            self.now,
-            signal_id=body["signal_id"],
-            channel=body["channel"],
+        value, error = accept_signal(
+            self.state, self.aggregate, self.records, body, self.now, self.retention_policy.message_horizon
         )
-        self.respond(body, {"receivers": accepted})
+        self.respond(body, value, error)
 
     def settle(self) -> None:
         state = self.state
@@ -506,7 +573,11 @@ class Transition:
             self.reserve_task(node)
 
     def control(self, body: dict[str, Any]) -> None:
-        state = self.aggregate["runs"].get(body.get("run_id") or self.aggregate["current"], self.state)
+        requested_run = body.get("run_id")
+        state = self.run(self.aggregate["current"] if requested_run is None else requested_run)
+        if state is None:
+            self.respond(body, error="NotFound")
+            return
         action = body["action"]
         digest = fingerprint([action, body["actor"], body["reason"], body.get("node_id")])
         previous = state["actions"].get(body["request_id"])
@@ -534,6 +605,7 @@ class Transition:
             state["archived"] = True
             state["input"], state["result"], state["error"] = None, None, None
             state["commands"], state["history"], state["channels"], state["nodes"] = [], [], {}, {}
+            state.pop("carried_signals", None)
             state["actions"][body["request_id"]] = digest
             event(state, "archived", self.now, actor=body["actor"], reason=body["reason"])
             self.respond(body)
@@ -706,6 +778,15 @@ class Transition:
                 elif kind == "deadline" and node["attempts"][-1]["dispatch_id"] == body["dispatch_id"]:
                     previous = node["attempts"][-1]
                     settle_task(state, node, self.now)
+                    if previous.get("final_error") is not None:
+                        ref = node["spec"]["ref"]
+                        self.emit(
+                            "cancel_task",
+                            {"dispatch_id": previous["dispatch_id"]},
+                            topic=self.topics.task_control(ref["name"], ref["version"]),
+                            key=previous["dispatch_id"],
+                            subscription="tasks",
+                        )
                     if node["state"] == "pending" and node["attempts"][-1] is not previous:
                         self.reserve_task(node)
         elif kind == "published":
@@ -747,8 +828,8 @@ class Transition:
     def notify(self) -> None:
         remaining = []
         for waiter in self.aggregate.get("waiters", []):
-            target = self.aggregate["runs"][waiter["run_id"]]
-            if target["status"] in TERMINAL | {"BLOCKED"}:
+            target = self.run(waiter["run_id"])
+            if target is None or target["status"] in TERMINAL | {"BLOCKED"}:
                 self.query(waiter, result=True)
             else:
                 remaining.append(waiter)
@@ -756,6 +837,7 @@ class Transition:
         state = self.state
         if state["status"] in TERMINAL and not state.get("notified"):
             state["notified"] = True
+            self.retire_tasks(state)
             for node in state["nodes"].values():
                 if node["state"] != "pending":
                     continue
@@ -858,11 +940,13 @@ class WorkflowEngine(Consumer):
         if delivery.topic == self.topics.control(key[1]) and message.kind != "control":
             raise ProtocolError("Unexpected operator message")
 
-        def update(aggregate: dict[str, Any], now: float) -> list[Publication]:
+        def update(aggregate: dict[str, Any], now: float, records: Records) -> list[Publication]:
             if message.body.get("not_before", 0) > now:
                 raise RetryLater()
             previous = clone(aggregate)
-            transition = Transition(aggregate, message, now, self.topics, self.retention_policy, self.max_commands)
+            transition = Transition(
+                aggregate, message, now, self.topics, self.retention_policy, self.max_commands, records
+            )
             try:
                 transition.handle()
             except ProtocolError as exc:
@@ -874,15 +958,20 @@ class WorkflowEngine(Consumer):
                     raise
                 aggregate.clear()
                 aggregate.update(previous)
+                records.writes.clear()
                 aggregate["active"] = None
-                transition = Transition(aggregate, message, now, self.topics, self.retention_policy, self.max_commands)
+                transition = Transition(
+                    aggregate, message, now, self.topics, self.retention_policy, self.max_commands, records
+                )
                 transition.state["status"], transition.state["blocked_reason"] = "BLOCKED", str(exc)[:1000]
                 transition.notify()
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProtocolError("Malformed workflow command") from exc
+            preserve_results(transition)
+            transition.persist_runs()
             return transition.outgoing
 
-        await self.store.apply(message.key, message, update)
+        await self.store.apply(message.key, message, RecordUpdate(update))
 
     async def step(self) -> bool:
         sent = await self.relay.step()

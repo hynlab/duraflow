@@ -230,6 +230,11 @@ DB secrets. `DURAFLOW_DATABASE_URL_FILE`, `DURAFLOW_TASK_JOURNAL_URL_FILE`, and
 `DURAFLOW_PULSAR_TOKEN_FILE` support secret files. TLS settings and the full
 configuration table are in [operations](guide/6_operations.md).
 
+For indefinite workflows, use bounded runs with stable signal epochs. See
+[long-running workflows and retention](docs/long-running-workflows.md) for the
+7-day retry/recovery contract, 14-day detail retention, automatic GC, and reply
+resource lifecycle.
+
 ### Why do the distributed guides use PostgreSQL?
 
 **SQLite is supported**, including durable state, task journals, and restart

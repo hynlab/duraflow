@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from collections import deque
@@ -124,12 +125,14 @@ class PulsarTransport:
         authentication: Any = None,
         tls_trust_certs_file_path: str | None = None,
         operation_timeout: float = 10.0,
+        producer_idle_timeout: float = 300.0,
     ):
         import pulsar
 
         if receiver_queue_size < 1 or max_routes < 1:
             raise ValueError("Queue size and route limit must be positive")
         duration(operation_timeout)
+        duration(producer_idle_timeout)
         options: dict[str, Any] = {
             "operation_timeout_seconds": 10,
             "connection_timeout_ms": 5000,
@@ -148,6 +151,10 @@ class PulsarTransport:
         self.queue_size, self.max_routes = receiver_queue_size, max_routes
         self.consumers: dict[tuple[str, str], Any] = {}
         self.producers: dict[str, Any] = {}
+        self.producer_used: dict[str, float] = {}
+        self.producer_busy: dict[str, int] = {}
+        self.producer_idle_timeout = producer_idle_timeout
+        self.publishing: set[asyncio.Task[None]] = set()
         self.provisioned: set[tuple[str, str]] = set()
         self.ordered: set[tuple[str, str]] = set()
         self.lock = asyncio.Lock()
@@ -155,6 +162,8 @@ class PulsarTransport:
         self.native_slots = asyncio.Semaphore(8)
         self.operation_timeout = operation_timeout
         self._closed = False
+        self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def ensure(self, topic: str, subscription: str, *, ordered: bool = False) -> None:
         async with self.lock:
@@ -163,7 +172,13 @@ class PulsarTransport:
                 raise ValueError("Cannot change an existing subscription's ordering mode")
             if key not in self.provisioned:
                 if len(self.provisioned) >= self.max_routes:
-                    raise ValueError("Declared subscription limit exceeded")
+                    # Reply declarations are hints, not ownership of a broker
+                    # subscription. Forgetting one must never delete its backlog.
+                    victim = next((k for k in self.provisioned if k[1] == "client" and k not in self.consumers), None)
+                    if victim is None:
+                        raise BufferError("Active subscription limit exceeded")
+                    self.provisioned.remove(victim)
+                    self.ordered.discard(victim)
 
                 def provision() -> None:
                     consumer = self.client.subscribe(
@@ -194,18 +209,6 @@ class PulsarTransport:
         key: str | None = None,
         deliver_at: float | None = None,
     ) -> None:
-        async with self.lock:
-            if topic not in self.producers:
-                if len(self.producers) >= self.max_routes:
-                    raise ValueError("Declared producer limit exceeded")
-                self.producers[topic] = await self._native(
-                    self.client.create_producer,
-                    topic,
-                    batching_enabled=False,
-                    block_if_queue_full=True,
-                    max_pending_messages=64,
-                    send_timeout_millis=5000,
-                )
         options: dict[str, Any] = {"properties": properties}
         if key is not None:
             options["partition_key"] = key
@@ -215,7 +218,59 @@ class PulsarTransport:
             if not math.isfinite(deliver_at) or deliver_at < 0:
                 raise ValueError("Delivery time must be a finite UTC timestamp")
             options["deliver_at"] = math.ceil(deliver_at * 1000)
-        await self._native(self.producers[topic].send, data, **options)
+        if self._closed or self._closing:
+            raise RuntimeError("Pulsar transport is closed")
+        if len(self.publishing) >= self.max_routes + 8:
+            raise BufferError("Pending publication limit exceeded")
+        # The owner task survives caller timeout/cancellation. Its producer stays
+        # pinned until the native send really finishes, not just until await exits.
+        task = asyncio.create_task(self._publish(topic, data, options))
+        self.publishing.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self.publishing.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        await asyncio.wait_for(asyncio.shield(task), self.operation_timeout)
+
+    async def _publish(self, topic: str, data: bytes, options: dict[str, Any]) -> None:
+        async with self.lock:
+            now = time.monotonic()
+            idle = sorted(
+                (key for key in self.producers if not self.producer_busy.get(key)),
+                key=lambda key: self.producer_used[key],
+            )
+            for victim in idle:
+                expired = now - self.producer_used[victim] >= self.producer_idle_timeout
+                pressure = topic not in self.producers and len(self.producers) >= self.max_routes
+                if not expired and not pressure:
+                    continue
+                await self._native(self.producers[victim].close, _wait_complete=True)
+                del self.producers[victim]
+                del self.producer_used[victim]
+                self.producer_busy.pop(victim, None)
+            if topic not in self.producers:
+                if len(self.producers) >= self.max_routes:
+                    raise BufferError("All producers are in use; retry publication")
+                self.producers[topic] = await self._native(
+                    self.client.create_producer,
+                    topic,
+                    batching_enabled=False,
+                    block_if_queue_full=True,
+                    max_pending_messages=64,
+                    send_timeout_millis=5000,
+                    _wait_complete=True,
+                )
+            producer = self.producers[topic]
+            self.producer_busy[topic] = self.producer_busy.get(topic, 0) + 1
+            self.producer_used[topic] = now
+        try:
+            await self._native(producer.send, data, _wait_complete=True, **options)
+        finally:
+            self.producer_busy[topic] -= 1
+            self.producer_used[topic] = time.monotonic()
 
     async def receive(self, topic: str, subscription: str, timeout: float = 0.1) -> Delivery | None:
         await self.ensure(topic, subscription, ordered=(topic, subscription) in self.ordered)
@@ -274,22 +329,33 @@ class PulsarTransport:
     async def unsubscribe(self, topic: str, subscription: str) -> None:
         key = topic, subscription
         async with self.lock:
-            consumer = self.consumers.pop(key, None)
-            if consumer is not None:
-                await self._native(consumer.unsubscribe)
+            consumer = self.consumers.get(key)
+            if consumer is None:
+                consumer = await self._subscribe(topic, subscription, ordered=key in self.ordered)
+                self.consumers[key] = consumer
+            await self._native(consumer.unsubscribe)
+            self.consumers.pop(key, None)
             self.provisioned.discard(key)
             self.ordered.discard(key)
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         if self._closed:
             return
         try:
+            if self.publishing:
+                await asyncio.gather(*self.publishing, return_exceptions=True)
             await self._native(self.client.close)
         finally:
             self._closed = True
             self.native_pool.shutdown(wait=False, cancel_futures=True)
 
-    async def _native(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    async def _native(self, fn: Any, *args: Any, _wait_complete: bool = False, **kwargs: Any) -> Any:
         if self._closed:
             raise RuntimeError("Pulsar transport is closed")
         await asyncio.wait_for(self.native_slots.acquire(), timeout=self.operation_timeout)
@@ -307,7 +373,9 @@ class PulsarTransport:
                 done.exception()
 
         future.add_done_callback(released)
-        return await asyncio.wait_for(asyncio.shield(future), timeout=self.operation_timeout)
+        return await asyncio.wait_for(
+            asyncio.shield(future), timeout=None if _wait_complete else self.operation_timeout
+        )
 
     async def ping(self) -> bool:
         topic = next(iter(self.provisioned))[0] if self.provisioned else "persistent://public/default/df-health"

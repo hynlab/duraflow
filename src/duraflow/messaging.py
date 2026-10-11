@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import re
+import math
 from typing import Any
 from uuid import uuid4
 
-from .contracts import ProtocolError, canonical, name, parse_json
+from .contracts import MessageSizeLimit, ProtocolError, canonical, name, parse_json
 
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
@@ -48,10 +49,23 @@ class Message:
             if not isinstance(value, typ) or (typ is int and type(value) is not int):
                 raise ProtocolError(f"Invalid message field: {key}")
 
+    def expires_at(self) -> float | None:
+        value = self.body.get("_df_expires_at")
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
+        ):
+            raise ProtocolError("Invalid message expiration")
+        return value
+
+    def admit(self, now: float) -> None:
+        expires_at = self.expires_at()
+        if expires_at is not None and now >= expires_at:
+            raise ProtocolError("Message retry horizon expired")
+
     def to_bytes(self) -> bytes:
         raw = canonical(asdict(self)).encode()
         if len(raw) > MAX_MESSAGE_BYTES:
-            raise ProtocolError("Message exceeds 16 MiB")
+            raise MessageSizeLimit("Generated message exceeds wire byte limit")
         return raw
 
     @classmethod
@@ -74,10 +88,13 @@ class Topics:
     namespace: str = "default"
     tenant: str = "public"
     environment: str = "default"
+    reply_environment: str | None = None
 
     def __post_init__(self) -> None:
         for value in (self.namespace, self.tenant, self.environment):
             name(value)
+        if self.reply_environment is not None:
+            name(self.reply_environment)
 
     def topic(self, role: str, entity: str) -> str:
         name(role)
@@ -117,6 +134,8 @@ class Topics:
         return self.topic("tags", "workflows")
 
     def reply(self, client: str) -> str:
+        if self.reply_environment is not None:
+            return Topics(self.namespace, self.tenant, self.reply_environment).topic("reply", client)
         return self.topic("reply", client)
 
     def instance(self, workflow: str, workflow_id: str) -> str:

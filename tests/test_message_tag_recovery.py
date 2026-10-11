@@ -39,7 +39,7 @@ async def test_paginated_task_tag_cancellation_restart_and_duplicate_controls():
         Message.from_bytes(data) for _, data, _ in broker.publications if Message.from_bytes(data).kind == "cancel_task"
     ]
     assert sorted(message.body["dispatch_id"] for message in cancellation) == ["a", "b", "c"]
-    assert (await store.read("task-tag/" + key))["jobs"]["stop"]["offset"] == 3
+    assert store.records["task-tag/" + key, "job/stop"][0]["offset"] == 3
     await broker.publish(topics.task_tags(control=True), command.to_bytes(), {}, key=key)
     await send("task_tag_cancel", {"request_id": "stop", "offset": 0}, control=True)
     await send("task_tag_cancel", {"request_id": "stop", "changed": True}, control=True)

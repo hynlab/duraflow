@@ -38,7 +38,7 @@ async def execute(args: argparse.Namespace) -> Any:
 
     roles = {"engine": "workflow-engine", "worker": "task-worker"}
     command = roles.get(args.command, args.command)
-    database_commands = {"init", "migrate", "health", "list"}
+    database_commands = {"init", "migrate", "health", "list", "gc"}
     role = command if command in ROLES else "workflow-engine" if command in database_commands else "client"
     settings = runtime_settings(args, role=role)
     topics = Topics(settings.namespace, settings.pulsar_tenant, settings.pulsar_namespace)
@@ -60,7 +60,18 @@ async def execute(args: argparse.Namespace) -> Any:
                 initialize = getattr(store, "initialize", None)
                 if initialize:
                     await initialize()
-                return {"initialized": True, "execution_protocol": 2, "schema_version": 1}
+                from .message_store import SQLiteMessageStore
+
+                return {
+                    "initialized": True,
+                    "execution_protocol": 2,
+                    "schema_version": 3 if isinstance(store, SQLiteMessageStore) else 4,
+                }
+            if command == "gc":
+                return {
+                    "dry_run": not args.apply,
+                    **await store.collect_garbage(limit=args.limit, dry_run=not args.apply),
+                }
             if command == "health":
                 return {"store_readable": await store.ping(), "namespace": settings.namespace}
             if command == "list":
@@ -118,6 +129,7 @@ async def execute(args: argparse.Namespace) -> Any:
                 ChannelRef(ref.name, ref.payload_type),
                 decode(parse_json(args.input), ref.payload_type),
                 signal_id=args.signal_id,
+                signal_epoch=args.signal_epoch,
             )
         if command in {"cancel", "terminate", "resume", "retry"}:
             await handle._control(

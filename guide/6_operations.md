@@ -2,6 +2,14 @@
 
 [Index](0_index.md) · Previous: [Distributed services](5_distributed.md)
 
+## Long-running workflows
+
+The current message journal uses PostgreSQL schema **4** / SQLite schema **3**.
+See [long-running workflows and retention](../docs/long-running-workflows.md) for
+stable signal epochs, hot/historical state separation, the seven-day recovery
+contract, task retirement, automatic GC, and the `gc` operator command. The
+schema-2 section below describes the earlier JSON representation migration.
+
 ## Role configuration
 
 | Role | Required connections |
@@ -209,3 +217,8 @@ identities. JSON retains the representation required by the wire codec. Existing
 documents, inbox identities, outbox owners, and leases are preserved during upgrade;
 numeric representations already normalized by an older journal cannot be recovered
 from that journal alone. Unknown/newer schema versions are rejected.
+## 1.0.3 reliability upgrade
+
+See [the 1.0.3 release notes](../docs/releases/1.0.3.md) for the PostgreSQL 4 /
+SQLite 3 journal migration, task start deadlines, independent control consumption,
+`SNAPSHOT_LIMIT` recovery, and telemetry availability semantics.

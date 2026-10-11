@@ -114,12 +114,14 @@ def test_envelope_field_validation(field, value):
 
 
 def test_message_size_limit_and_unicode_roundtrip():
+    from duraflow.contracts import MessageSizeLimit
+
     message = Message("test", "key", {"text": ""}, id="stable")
     overhead = len(message.to_bytes())
     exact = Message("test", "key", {"text": "a" * (MAX_MESSAGE_BYTES - overhead)}, id="stable")
     assert len(exact.to_bytes()) == MAX_MESSAGE_BYTES
     assert Message.from_bytes(exact.to_bytes()) == exact
-    with pytest.raises(ProtocolError):
+    with pytest.raises(MessageSizeLimit):
         Message("test", "key", {"text": exact.body["text"] + "a"}, id="stable").to_bytes()
     with pytest.raises(ProtocolError):
         Message.from_bytes(b" " * (MAX_MESSAGE_BYTES + 1))

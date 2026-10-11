@@ -101,6 +101,10 @@ class HealthState:
     checked_at: float = 0
     started_at: float = field(default_factory=time.monotonic)
     stats: dict[str, Any] = field(default_factory=dict)
+    telemetry_available: bool = False
+    telemetry_checked_at: float = 0
+    telemetry_max_age: float = 15
+    telemetry_failures: int = 0
 
     def readiness(self, max_age: float) -> bool:
         return self.alive and self.ready and not self.draining and time.monotonic() - self.checked_at <= max_age
@@ -121,20 +125,37 @@ def render_metrics(runtime: Any, health: HealthState, role: str) -> str:
     for key in sorted(COUNTERS):
         if key in runtime.metrics:
             lines.append(f'duraflow_{key}_total{{role="{role}"}} {int(runtime.metrics[key])}')
+    relay = getattr(runtime, "relay", None)
+    if relay is not None:
+        for kind, count in relay.gc_totals.items():
+            lines.append(f'duraflow_gc_deleted_total{{role="{role}",kind="{kind}"}} {count}')
+    transport = getattr(runtime, "transport", None)
+    for name in ("producers", "consumers", "provisioned", "publishing"):
+        cache = getattr(transport, name, None)
+        if cache is not None:
+            lines.append(f'duraflow_transport_resources{{role="{role}",kind="{name}"}} {len(cache)}')
     lines.extend(
         [
             f'duraflow_ready{{role="{role}"}} {int(health.ready and not health.draining)}',
             f'duraflow_draining{{role="{role}"}} {int(health.draining)}',
             f'duraflow_uptime_seconds{{role="{role}"}} {max(0, time.monotonic() - health.started_at):.3f}',
-            f'duraflow_due_work_lag_seconds{{role="{role}"}} {max(0, float(health.stats.get("due_lag", 0))):.3f}',
         ]
     )
-    lines.append(
-        f'duraflow_sampled_outbox_age_seconds{{role="{role}"}} {max(0, float(health.stats.get("outbox_age", 0))):.3f}'
+    available = (
+        health.telemetry_available and time.monotonic() - health.telemetry_checked_at <= health.telemetry_max_age
     )
-    counts = health.stats.get("statuses", {})
+    lines.append(f'duraflow_telemetry_available{{role="{role}"}} {int(available)}')
+    lines.append(f'duraflow_telemetry_failures_total{{role="{role}"}} {health.telemetry_failures}')
+    stats = health.stats if available else {}
+    for key, metric in (("due_lag", "due_work_lag"), ("outbox_age", "sampled_outbox_age")):
+        value = f"{max(0, float(stats[key])):.3f}" if key in stats else "NaN"
+        lines.append(f'duraflow_{metric}_seconds{{role="{role}"}} {value}')
+    observed = stats.get("observed_at", "NaN")
+    lines.append(f'duraflow_telemetry_observed_timestamp_seconds{{role="{role}"}} {observed}')
+    counts = stats.get("statuses")
     for status in STATUSES:
-        lines.append(f'duraflow_runs{{role="{role}",status="{status}"}} {int(counts.get(status, 0))}')
+        value = str(int(counts.get(status, 0))) if counts is not None else "NaN"
+        lines.append(f'duraflow_runs{{role="{role}",status="{status}"}} {value}')
     return "\n".join(lines) + "\n"
 
 
