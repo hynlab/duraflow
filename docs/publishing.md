@@ -80,7 +80,7 @@ reuse its filenames. Do not re-run a successfully published version blindly.
 ```bash
 pip install duraflow
 # Or pin the release:
-pip install 'duraflow==1.0.1'
+pip install 'duraflow==1.0.3'
 ```
 
 Python 3.12 or newer is required. These commands are valid only after the
