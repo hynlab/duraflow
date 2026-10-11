@@ -9,12 +9,15 @@ import sys
 
 from .contracts import Registry, canonical, parse_json
 from .replay import replay
+from .messaging import MAX_MESSAGE_BYTES
+from .executor import REPLAY_ENVELOPE_RESERVE
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True)
     parser.add_argument("--max-bytes", type=int, required=True)
+    parser.add_argument("--max-output-bytes", type=int, default=MAX_MESSAGE_BYTES - REPLAY_ENVELOPE_RESERVE)
     args = parser.parse_args()
     protocol_output = sys.stdout.buffer
     # Application prints and exception traces are not the protocol or diagnostics.
@@ -56,8 +59,8 @@ def main() -> None:
             except Exception as exc:
                 response = {"ok": False, "code": type(exc).__name__}
             encoded = canonical(response).encode() + b"\n"
-            if len(encoded) > args.max_bytes:
-                return
+            if len(encoded) > min(args.max_bytes, args.max_output_bytes):
+                encoded = b'{"ok":false,"code":"ACTIVATION_RESULT_LIMIT"}\n'
             protocol_output.write(encoded)
             protocol_output.flush()
 

@@ -7,6 +7,7 @@ import sys
 from typing import Protocol
 
 from .contracts import (
+    ActivationResultLimit,
     NonDeterminism,
     ProtocolError,
     UnsupportedWorkflow,
@@ -18,6 +19,9 @@ from .contracts import (
 )
 from .replay import Activation, replay
 from .storage import State
+from .messaging import MAX_MESSAGE_BYTES
+
+REPLAY_ENVELOPE_RESERVE = 4096
 
 
 class ReplayExecutor(Protocol):
@@ -60,6 +64,7 @@ class ProcessReplayExecutor:
         duration(startup_timeout)
         self.app, self.timeout, self.startup_timeout = app, timeout, startup_timeout
         self.max_bytes = max_bytes
+        self.max_output_bytes = min(max_bytes, MAX_MESSAGE_BYTES - REPLAY_ENVELOPE_RESERVE)
         self._semaphore = asyncio.Semaphore(workers)
         self._idle: list[asyncio.subprocess.Process] = []
         self._processes: set[asyncio.subprocess.Process] = set()
@@ -91,6 +96,8 @@ class ProcessReplayExecutor:
             self.app,
             "--max-bytes",
             str(self.max_bytes),
+            "--max-output-bytes",
+            str(self.max_output_bytes),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -131,6 +138,8 @@ class ProcessReplayExecutor:
                 raw = await asyncio.wait_for(exchange(), self.timeout)
                 if not raw or len(raw) > self.max_bytes:
                     raise WorkflowBlocked("REPLAY_EXECUTOR_INVALID_RESPONSE")
+                if len(raw) > self.max_output_bytes:
+                    raise ActivationResultLimit()
                 response = parse_json(raw)
                 if not isinstance(response, dict) or type(response.get("ok")) is not bool:
                     raise WorkflowBlocked("REPLAY_EXECUTOR_INVALID_RESPONSE")
@@ -140,6 +149,8 @@ class ProcessReplayExecutor:
                 process = None
                 if not response["ok"]:
                     code = response.get("code")
+                    if code == "ACTIVATION_RESULT_LIMIT":
+                        raise ActivationResultLimit()
                     if code == "NonDeterminism":
                         raise NonDeterminism("Isolated replay diverged from committed history")
                     if code == "UnsupportedWorkflow":

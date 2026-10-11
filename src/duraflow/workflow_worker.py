@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
-from .contracts import ProtocolError, Registry, WorkflowBlocked
+from .contracts import ActivationResultLimit, MessageSizeLimit, ProtocolError, Registry, WorkflowBlocked
 from .message_runtime import Consumer
 from .messaging import Message, Topics
 from .state import identity
@@ -59,6 +60,8 @@ class WorkflowWorker(Consumer):
                                 raise ProtocolError("Child contract mismatch")
                             member["manifest"] = child.manifest
             result = {"kind": activation.kind, "value": activation.value}
+        except ActivationResultLimit:
+            result = {"kind": "blocked", "value": "ACTIVATION_RESULT_LIMIT"}
         except (ProtocolError, WorkflowBlocked) as exc:
             result = {"kind": "blocked", "value": type(exc).__name__}
         response = Message(
@@ -72,7 +75,14 @@ class WorkflowWorker(Consumer):
             },
             id=identity(message.id, "result"),
         )
-        await self.transport.publish(body["reply_to"], response.to_bytes(), {}, key=message.key)
+        try:
+            raw = response.to_bytes()
+        except MessageSizeLimit:
+            # Replay output can grow here, including child manifests and envelope
+            # metadata. Preserve identity so publication retries remain idempotent.
+            response = replace(response, body={**response.body, "kind": "blocked", "value": "ACTIVATION_RESULT_LIMIT"})
+            raw = response.to_bytes()
+        await self.transport.publish(body["reply_to"], raw, {}, key=message.key)
 
     async def close(self) -> None:
         if self.replay_executor:

@@ -76,6 +76,13 @@ class WorkflowBlocked(DuraflowError):
     pass
 
 
+class ActivationResultLimit(WorkflowBlocked):
+    """A replay decision cannot fit the activation-result publication budget."""
+
+    def __init__(self) -> None:
+        super().__init__("ACTIVATION_RESULT_LIMIT")
+
+
 class WorkflowFailed(DuraflowError):
     pass
 
