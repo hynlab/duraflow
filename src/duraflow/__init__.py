@@ -47,7 +47,7 @@ from .transport import MemoryTransport, PulsarTransport, Transport
 from .config import RuntimeSettings
 from .runtime import Runtime
 
-__version__ = "1.0.3"
+__version__ = "1.1.0"
 __all__ = [
     "Archived",
     "BroadcastBinding",

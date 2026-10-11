@@ -217,6 +217,28 @@ identities. JSON retains the representation required by the wire codec. Existing
 documents, inbox identities, outbox owners, and leases are preserved during upgrade;
 numeric representations already normalized by an older journal cannot be recovered
 from that journal alone. Unknown/newer schema versions are rejected.
+
+## 1.1.0 activation-result size recovery
+
+An oversized Worker-to-Engine execution decision now leaves the run in
+`BLOCKED` with `blocked_reason=ACTIVATION_RESULT_LIMIT` and releases its active
+activation. Commands from that decision are not partially committed. Previously
+committed history remains available. This differs from `SNAPSHOT_LIMIT`, which
+limits the Engine-to-Worker execution snapshot.
+
+The process executor reserves 4 KiB for response-envelope overhead while retaining
+its default 16 MiB input limit. The worker also checks the final serialized message,
+including child manifests. Inline/custom executors receive the same final check.
+
+Inspect the blocked reason using `describe`. Resolve the response-size cause with
+a replay-compatible runtime/application deployment before audited `resume`; resume
+alone does not reduce the decision size and will block again if it still exceeds
+the budget. Do not rewrite committed history or change a pinned build's behavior
+to bypass replay checks. New workflows can use smaller deterministic batches.
+
+See [the 1.1.0 release notes](../docs/releases/1.1.0.md). Protocol and database schema
+versions are unchanged from 1.0.3.
+
 ## 1.0.3 reliability upgrade
 
 See [the 1.0.3 release notes](../docs/releases/1.0.3.md) for the PostgreSQL 4 /
