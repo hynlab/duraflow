@@ -3,6 +3,7 @@
 from typing import Any
 
 from .contracts import TERMINAL
+from .failures import group_failure
 from .lifecycle import accepted_before_cancel, deadline_error
 from .state import attempt, event, finish_node
 from .storage import State, clone
@@ -10,6 +11,16 @@ from .storage import State, clone
 
 def error_data(code: str, message: str | None = None) -> dict[str, Any]:
     return {"code": code, "message": message or code}
+
+
+def retry_delay(policy: dict[str, Any], number: int) -> float:
+    """Bound each multiplication instead of overflowing an intermediate power."""
+    delay = min(policy["delay"], policy["max_delay"])
+    for _ in range(number - 1):
+        if delay >= policy["max_delay"] / policy["multiplier"]:
+            return float(policy["max_delay"])
+        delay *= policy["multiplier"]
+    return float(min(delay, policy["max_delay"]))
 
 
 def settle_task(state: State, node: State, now: float) -> None:
@@ -52,7 +63,7 @@ def settle_task(state: State, node: State, now: float) -> None:
     current["final_error"] = clone(error)
     if can_retry and current["number"] < policy["max_attempts"]:
         next_attempt = attempt(current["number"] + 1, now)
-        delay = min(policy["max_delay"], policy["delay"] * policy["multiplier"] ** min(current["number"] - 1, 30))
+        delay = retry_delay(policy, current["number"])
         next_attempt["not_before"] = now + delay
         node["attempts"].append(next_attempt)
         event(state, "retry_scheduled", now, node_id=node["id"], attempt=next_attempt["number"])
@@ -81,11 +92,7 @@ def collect(state: State, now: float) -> None:
             failures = [node["error"] for node in nodes if node["state"] == "error"]
             if failures:
                 record["state"] = "error"
-                record["error"] = (
-                    failures[0]
-                    if len(nodes) == 1
-                    else {"code": "GROUP_FAILURE", "message": "One or more group members failed", "causes": failures}
-                )
+                record["error"] = failures[0] if len(nodes) == 1 else group_failure(failures)
             else:
                 record["state"] = "done"
                 values = [clone(node["result"]) for node in nodes]

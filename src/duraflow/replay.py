@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any, Callable, Generator, Generic, TypeVar, cast
 from uuid import UUID
 
+from .failures import command_failure
+
 from .contracts import (
     CODEC_VERSION,
     HandlerRef,
@@ -229,7 +231,7 @@ def replay(definition: WorkflowDefinition, state: dict[str, Any], *, max_steps: 
             if record["state"] == "pending":
                 return Activation("waiting")
             if record["state"] == "error":
-                error = TaskFailure(record["error"])
+                error = command_failure(record)
             else:
                 value = decode(record["result"])
         raise UnsupportedWorkflow("Replay operation budget exceeded")

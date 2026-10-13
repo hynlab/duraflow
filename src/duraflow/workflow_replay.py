@@ -23,6 +23,7 @@ from .contracts import (
     WorkflowDefinition,
 )
 from .replay import Activation, Operation, WorkflowContext as ReplayContext
+from .failures import command_failure
 
 
 T = TypeVar("T")
@@ -166,7 +167,7 @@ def execute(definition: WorkflowDefinition, state: dict[str, Any], *, max_steps:
                 return Activation("waiting")
             error, value = None, None
             if awaited["state"] == "error":
-                error = TaskFailure(awaited["error"])
+                error = command_failure(awaited)
             else:
                 value = awaited["result"]
         raise UnsupportedWorkflow("Replay operation budget exceeded")

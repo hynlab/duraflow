@@ -913,11 +913,21 @@ class WorkflowEngine(Consumer):
     async def handle(self, message: Message, delivery: Delivery) -> None:
         if delivery.topic not in {route[0] for route in self.routes}:
             raise ProtocolError("Wrong workflow route")
-        from .contracts import parse_json
+        from .contracts import name, parse_json
 
         key = parse_json(message.key)
-        if not isinstance(key, list) or len(key) != 3 or key[0] != self.topics.namespace:
+        if (
+            not isinstance(key, list)
+            or len(key) != 3
+            or not all(isinstance(part, str) for part in key)
+            or key[0] != self.topics.namespace
+            or not 1 <= len(key[2]) <= 256
+        ):
             raise ProtocolError("Invalid workflow key")
+        try:
+            name(key[1])
+        except ValueError as exc:
+            raise ProtocolError("Invalid workflow name in key") from exc
         if delivery.topic not in {
             self.topics.workflow(key[1]),
             self.topics.commands(key[1]),

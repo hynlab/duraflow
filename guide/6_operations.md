@@ -218,6 +218,26 @@ documents, inbox identities, outbox owners, and leases are preserved during upgr
 numeric representations already normalized by an older journal cannot be recovered
 from that journal alone. Unknown/newer schema versions are rejected.
 
+## 1.1.1 group failures and retry recovery
+
+Large parallel failures now reach workflow `except TaskFailure` handlers as a
+bounded `GROUP_FAILURE`. If the full error would exceed the payload byte or nesting
+limit, `error["causes"]` contains an ordered prefix and `error["omitted_causes"]`
+counts the excluded failures. Inspect the individual node records for full errors.
+
+For a 1.1.0 run blocked with `ProtocolError` by an oversized group summary, upgrade
+the engines and workflow workers and then use audited `resume`. Replay bounds the
+old summary without changing history. This does not bypass other protocol errors
+or the separate snapshot/activation message limits.
+
+Retry scheduling now handles extreme finite multipliers and grows past attempt 31
+up to `max_delay`. Already committed retry timestamps are unchanged. A run left
+`WAITING` by the old overflow depends on redelivery of its failed outcome or timer
+message after the state owner is upgraded; the upgrade does not synthesize missing
+broker messages.
+
+See [the 1.1.1 release notes](../docs/releases/1.1.1.md).
+
 ## 1.1.0 activation-result size recovery
 
 An oversized Worker-to-Engine execution decision now leaves the run in
